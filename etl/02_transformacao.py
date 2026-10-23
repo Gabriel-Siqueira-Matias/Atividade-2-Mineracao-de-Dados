@@ -58,9 +58,32 @@ def unifica_clientes(qa):
     Decisão 1: Pareamento seguro por CPF válido e aproximado por Nome + Localidade
     """
     eng = eng_dw()
-    df_leg = pd.read_sql('SELECT "ID_CLIENTE" as id_legado, "NOME" as nome, "CPF" as cpf, "CIDADE" as cidade, "UF" as uf FROM stg.legado_clientes', eng)
-    df_eco = pd.read_sql("SELECT customer_id as id_ecommerce, full_name as nome, tax_id as cpf, city as cidade, state as uf FROM stg.ecommerce_customer", eng)
+
+    # Leitura das tabelas
+    df_leg = pd.read_sql("""
+        SELECT
+            "ID_CLIENTE"as id_legado,
+            "NOME" as nome, "CPF" as cpf,
+            "CIDADE" as cidade,
+            "UF" as uf,
+            "DT_CADASTRO" AS data_cadastro
+        FROM stg.legado_clientes
+    """, eng)
+    df_leg["cadastro_data"] = pd.to_datetime(df_leg["data_cadastro"], errors="coerce").dt.date
     
+    df_eco = pd.read_sql("""
+        SELECT
+            customer_id as id_ecommerce,
+            full_name as nome,
+            tax_id as cpf,
+            city as cidade,
+            state as uf,
+            created_at AS data_cadastro
+        FROM stg.ecommerce_customer
+    """, eng)
+    df_eco["cadastro_data"] = pd.to_datetime(df_eco["data_cadastro"],errors="coerce",utc=True).dt.date
+
+    # Formatação dos dados
     for df in [df_leg, df_eco]:
         df['cpf_limpo'] = df['cpf'].apply(so_digitos)
         df['cpf_validado'] = df['cpf_limpo'].apply(cpf_valido)
@@ -82,6 +105,7 @@ def unifica_clientes(qa):
     match_cpf['uf'] = match_cpf['uf_eco'].fillna(match_cpf['uf_leg'])
     match_cpf['cpf_validado_col'] = True
 
+    # Dados que não passaram no pareamento 1
     matched_leg_ids = match_cpf['id_legado'].dropna().unique()
     matched_eco_ids = match_cpf['id_ecommerce'].dropna().unique()
     
@@ -99,13 +123,14 @@ def unifica_clientes(qa):
     match_nome['uf'] = match_nome['uf_leg']
     match_nome['cpf_validado_col'] = match_nome['cpf_validado_eco'].fillna(match_nome['cpf_validado_leg'])
 
+    # Dados que não passaram no pareamento 2
     matched_nome_leg_ids = match_nome['id_legado'].dropna().unique()
     matched_nome_eco_ids = match_nome['id_ecommerce'].dropna().unique()
 
     leg_sobra_final = leg_sobra[~leg_sobra['id_legado'].isin(matched_nome_leg_ids)]
     eco_sobra_final = eco_sobra[~eco_sobra['id_ecommerce'].isin(matched_nome_eco_ids)]
     
-    # Exclusivos de cada base
+    # Exclusivos de cada base de dados
     leg_exclusivo = leg_sobra_final.copy()
     leg_exclusivo['id_ecommerce'] = None
     leg_exclusivo['origem_unificacao'] = 'LEGADO'
@@ -125,9 +150,31 @@ def unifica_clientes(qa):
     eco_exclusivo['cidade'] = eco_exclusivo['cidade']
     eco_exclusivo['uf'] = eco_exclusivo['uf']
     eco_exclusivo['cpf_validado_col'] = eco_exclusivo['cpf_validado']
+
+    # Validação de data de cadastro
+    def primeira_data(df):
+        datas = pd.concat([pd.to_datetime(df["cadastro_data_leg"], errors="coerce"), pd.to_datetime(df["cadastro_data_eco"], errors="coerce")], axis=1)
+        return datas.min(axis=1).dt.date
+
+    match_cpf["dt_primeiro_cadastro"] = primeira_data(match_cpf)
+    match_nome["dt_primeiro_cadastro"] = primeira_data(match_nome)
+
+    leg_exclusivo["dt_primeiro_cadastro"] = leg_exclusivo["cadastro_data"]
+    eco_exclusivo["dt_primeiro_cadastro"] = eco_exclusivo["cadastro_data"]
     
     # Concatenar a dimensão
-    colunas = ['id_legado', 'id_ecommerce', 'origem_unificacao', 'regra_pareamento', 'cpf_normalizado', 'cpf_validado_col', 'nome_padronizado', 'cidade', 'uf']
+    colunas = [
+        "id_legado",
+        "id_ecommerce",
+        "origem_unificacao",
+        "regra_pareamento",
+        "cpf_normalizado",
+        "cpf_validado_col",
+        "nome_padronizado",
+        "cidade",
+        "uf",
+        "dt_primeiro_cadastro"
+    ]
     dim_cliente = pd.concat([match_cpf[colunas], match_nome[colunas], leg_exclusivo[colunas], eco_exclusivo[colunas]], ignore_index=True)
     
     # Normalizar cpfs vazios ou strings em branco para None
@@ -305,15 +352,15 @@ def conforma_categorias(qa):
     Decisão 4: Mapeamento de taxonomia para uma categoria_conformada de agregação.
     """
     eng = eng_dw()
-    df_leg = pd.read_sql('SELECT "ID_PRODUTO" as id_origem, "DESCRICAO" as descricao, "CATEGORIA" as categoria_origem FROM stg.legado_produtos', eng)
-    df_leg['origem'] = 'LEGADO'
+    df_leg = pd.read_sql('SELECT "ID_PRODUTO" AS id_legado, "DESCRICAO" AS descricao, "CATEGORIA" AS categoria_origem, "PRECO_TABELA" AS preco_referencia, "ATIVO" AS ativo FROM stg.legado_produtos', eng)
+    df_leg["origem"] = "LEGADO"
+    df_leg["id_ecommerce"] = None
+    df_leg["sku"] = None
+    df_leg["ativo"] = (df_leg["ativo"].astype("string").str.strip().str.upper().map({"S": True, "N": False}))
     
-    df_eco = pd.read_sql("""
-        SELECT p.product_id as id_origem, p.title as descricao, c.name as categoria_origem 
-        FROM stg.ecommerce_product p 
-        LEFT JOIN stg.ecommerce_category c ON p.category_id = c.category_id
-    """, eng)
-    df_eco['origem'] = 'ECOM'
+    df_eco = pd.read_sql('SELECT p.product_id AS id_ecommerce, p.sku, p.title AS descricao, c.name AS categoria_origem, p.list_price AS preco_referencia, p.active AS ativo FROM stg.ecommerce_product p LEFT JOIN stg.ecommerce_category c ON p.category_id = c.category_id', eng)
+    df_eco["origem"] = "ECOM"
+    df_eco["id_legado"] = None
 
     dim_produto = pd.concat([df_leg, df_eco], ignore_index=True)
     
@@ -427,18 +474,90 @@ if __name__ == "__main__":
 
     # Asserções
     eng = eng_dw()
-    dim_cliente = pd.read_sql("SELECT * FROM dw.dim_cliente", eng)
-    fato_pedido = pd.read_sql("SELECT * FROM dw.fato_pedido", eng)
+    with eng.connect() as cx:
+        # 1 — Sem CPF válido repetido entre os clientes conformados.
+        clientes = pd.read_sql(text("""
+            SELECT
+                cpf_normalizado,
+                origem_unificacao
+            FROM dw.dim_cliente
+        """), cx)
+        cpf = clientes["cpf_normalizado"].astype("string").str.strip().fillna("")
+        cpf_validos = cpf.loc[cpf.ne("") & cpf.map(cpf_valido)]
+        qa.unico("CPF valido sem duplicidade", cpf_validos)
 
-    dim_cliente['cpf_normalizado'] = dim_cliente['cpf_normalizado'].replace('', None)
-    cpf_validos = dim_cliente.dropna(subset=['cpf_normalizado'])
-    qa.unico("cpf_normalizado em dim_cliente", cpf_validos['cpf_normalizado'])
-    
-    origens_validas = bool(dim_cliente['origem_unificacao'].isin(['LEGADO', 'ECOM', 'AMBOS']).sum() == len(dim_cliente))
-    qa.igual("origens unificacao conhecidas", int(dim_cliente['origem_unificacao'].isin(['LEGADO', 'ECOM', 'AMBOS']).sum()), len(dim_cliente))
-    
-    # Validação da cardinalidade_preservada (330 mil pedidos totais: 130k legado + 200k ecom)
-    qa.cardinalidade_preservada("fato_pedido", len(fato_pedido), 330000)
+        # 2 — Toda linha identifica corretamente sua origem de unificação.
+        qa.dominio("origem_unificacao no dominio", clientes["origem_unificacao"], {"LEGADO", "ECOM", "AMBOS"},)
+
+        # 3 — LEFT JOIN preserva a origem por construção; se a contagem aumentar,
+        # a dimensão tem IDs de cliente repetidos e a junção multiplicou pedidos.
+        contagens = cx.execute(text("""
+            SELECT
+                (
+                    SELECT COUNT(*)
+                    FROM stg.legado_pedidos
+                ) + (
+                    SELECT COUNT(*)
+                    FROM stg.ecommerce_orders
+                ) AS antes,
+                
+                (
+                    SELECT COUNT(*)
+                    FROM stg.legado_pedidos p
+                    LEFT JOIN dw.dim_cliente c
+                    ON c.id_legado = p."ID_CLIENTE"
+                ) + (
+                    SELECT COUNT(*)
+                    FROM stg.ecommerce_orders p
+                    LEFT JOIN dw.dim_cliente c
+                    ON c.id_ecommerce = p.customer_id
+                ) AS depois
+        """)).mappings().one()
+        qa.cardinalidade_preservada("pedidos x clientes sem multiplicacao", int(contagens["antes"]), int(contagens["depois"]),)
+
+        # 4 — Compara, PEDIDO A PEDIDO, o valor_mercadoria com a soma dos
+        # itens da respectiva origem. FULL OUTER JOIN detecta pedidos ausentes
+        # do DW e fatos sem pedido na fonte (além de diferenças > R$ 0,01).
+        divergencias = cx.execute(text("""
+            WITH
+                itens_leg AS (
+                    SELECT "ID_PEDIDO" AS id_pedido,
+                        SUM("QTD"::numeric * "VL_UNITARIO"::numeric) AS valor_itens
+                    FROM stg.legado_itens_pedido
+                    GROUP BY "ID_PEDIDO"
+                ),
+                itens_eco AS (
+                    SELECT order_id AS id_pedido,
+                        SUM(quantity::numeric * unit_price::numeric) AS valor_itens
+                    FROM stg.ecommerce_order_item
+                    GROUP BY order_id
+                ),
+            esperado AS (
+                SELECT 'LEGADO'::text AS sistema_origem,
+                    'LEG-' || p."ID_PEDIDO"::text AS id_origem,
+                    i.valor_itens
+                FROM stg.legado_pedidos p
+                LEFT JOIN itens_leg i ON i.id_pedido = p."ID_PEDIDO"
+                UNION ALL
+                SELECT
+                    'ECOM'::text AS sistema_origem,
+                    'ECOM-' || p.order_id::text AS id_origem,
+                    i.valor_itens
+                FROM stg.ecommerce_orders p
+                LEFT JOIN itens_eco i ON i.id_pedido = p.order_id
+            )
+            SELECT COUNT(*)
+                FROM esperado e
+                FULL OUTER JOIN dw.fato_pedido f
+                ON f.sistema_origem = e.sistema_origem
+                AND f.id_origem = e.id_origem
+                WHERE e.id_origem IS NULL
+                OR f.pedido_sk IS NULL
+                OR e.valor_itens IS NULL
+                OR f.valor_mercadoria IS NULL
+                OR ABS(e.valor_itens - f.valor_mercadoria) > 0.01
+        """)).scalar_one()
+        qa.igual("pedidos divergentes de itens (> R$0,01)", int(divergencias), 0,)
 
     qa.registrar(eng_dw())
     if qa.imprimir():
