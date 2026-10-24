@@ -204,6 +204,8 @@ def conforma_status(qa):
     Decisão 2: Criado nível hierárquico (status_conformado e motivo_cancelamento)
     """
     eng = eng_dw()
+    
+    # Mapeia os status
     status_map = [
         {'status_origem': 'ENTREGUE', 'sistema': 'LEGADO', 'status_conformado': 'CONCLUIDO', 'motivo_cancelamento': None},
         {'status_origem': 'CANCELADO', 'sistema': 'LEGADO', 'status_conformado': 'CANCELADO', 'motivo_cancelamento': 'NAO_INFORMADO'},
@@ -223,6 +225,54 @@ def conforma_status(qa):
     with eng.begin() as conn:
         conn.execute(text("TRUNCATE TABLE dw.dim_status CASCADE;"))
     dim_status.to_sql('dim_status', eng, schema='dw', if_exists='append', index=False)
+
+
+def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
+    """
+    Recupera SKs cujos IDs da origem foram perdidos na deduplicação.
+    Só utiliza CPF com 11 dígitos e correspondência ÚNICA na dimensão.
+    Se restar pedido sem vínculo, interrompe em vez de associar a outro cliente.
+    """
+    # Verificar vinculação dos pedidos
+    antes = len(pedidos)
+    pendentes = pedidos["cliente_sk"].isna()
+    n_pendentes = int(pendentes.sum())
+    if n_pendentes == 0:
+        print(f"[OK] {sistema}: todos os pedidos vinculados pelo ID original")
+        return pedidos
+
+    # Verificar ids nulos ou duplicados
+    if cadastro["id_cliente_origem"].isna().any() or cadastro["id_cliente_origem"].duplicated().any():
+        raise ValueError(f"{sistema}: IDs de clientes nulos/duplicados no staging")
+
+    cpfs_origem = cadastro.copy()
+    cpfs_origem["cpf_limpo"] = cpfs_origem["cpf"].apply(so_digitos)
+    cpf_por_id = cpfs_origem.set_index("id_cliente_origem")["cpf_limpo"]
+
+    # CHAR(11) do PostgreSQL pode conter espaços à direita.
+    indice_cpf = dim_cliente[["cpf_normalizado", "cliente_sk"]].copy()
+    indice_cpf["cpf_normalizado"] = indice_cpf["cpf_normalizado"].astype("string").str.strip()
+    indice_cpf = indice_cpf[indice_cpf["cpf_normalizado"].str.fullmatch(r"\d{11}").fillna(False)]
+    if indice_cpf["cpf_normalizado"].duplicated().any():
+        raise ValueError("dw.dim_cliente: CPF duplicado; pareamento ambíguo")
+    sk_por_cpf = indice_cpf.set_index("cpf_normalizado")["cliente_sk"]
+
+    cpfs_pendentes = pedidos.loc[pendentes, "id_cliente_origem"].map(cpf_por_id)
+    cpfs_pendentes = cpfs_pendentes.where(cpfs_pendentes.str.fullmatch(r"\d{11}").fillna(False))
+    pedidos.loc[pendentes, "cliente_sk"] = cpfs_pendentes.map(sk_por_cpf)
+
+    recuperados = n_pendentes - int(pedidos["cliente_sk"].isna().sum())
+    print(f"\n[OK] {sistema}: {recuperados}/{n_pendentes} pedidos recuperados por CPF")
+    restantes = int(pedidos["cliente_sk"].isna().sum())
+    if restantes:
+        raise ValueError(
+            f"{sistema}: {restantes} pedidos sem cliente inequívoco. "
+            "Carga interrompida: não associar ao primeiro cliente da dimensão."
+        )
+    if len(pedidos) != antes:
+        raise ValueError(f"{sistema}: recuperação alterou cardinalidade dos pedidos")
+    pedidos["cliente_sk"] = pedidos["cliente_sk"].astype("int64")
+    return pedidos
 
 
 # ===========================================================================
@@ -265,7 +315,7 @@ def conforma_valores(qa):
         conn.execute(text("TRUNCATE TABLE dw.dim_canal CASCADE;"))
     dim_canal.to_sql('dim_canal', eng, schema='dw', if_exists='append', index=False)
 
-    dim_cliente = pd.read_sql("SELECT cliente_sk, id_legado, id_ecommerce FROM dw.dim_cliente", eng)
+    dim_cliente = pd.read_sql("SELECT cliente_sk, id_legado, id_ecommerce, cpf_normalizado FROM dw.dim_cliente", eng)
     dim_cliente['id_legado'] = dim_cliente['id_legado'].astype('Int64')
     dim_cliente['id_ecommerce'] = dim_cliente['id_ecommerce'].astype('Int64')
 
@@ -288,7 +338,9 @@ def conforma_valores(qa):
     ped_leg.rename(columns={'id_cliente': 'id_cliente_origem', 'vl_desconto': 'valor_desconto'}, inplace=True)
     
     ped_leg['id_cliente_origem'] = ped_leg['id_cliente_origem'].astype('Int64')
-    ped_leg = ped_leg.merge(dim_cliente, left_on='id_cliente_origem', right_on='id_legado', how='left')
+    ped_leg = ped_leg.merge(dim_cliente[dim_cliente['id_legado'].notna()],
+                            left_on='id_cliente_origem', right_on='id_legado',
+                            how='left', validate='many_to_one')
 
     # E-commerce
     ped_eco = pd.read_sql("SELECT order_id, customer_id, status as status_origem, freight_amount, placed_at, delivered_at FROM stg.ecommerce_orders", eng)
@@ -305,12 +357,22 @@ def conforma_valores(qa):
     ped_eco.rename(columns={'customer_id': 'id_cliente_origem', 'discount': 'valor_desconto'}, inplace=True)
     
     ped_eco['id_cliente_origem'] = ped_eco['id_cliente_origem'].astype('Int64')
-    ped_eco = ped_eco.merge(dim_cliente, left_on='id_cliente_origem', right_on='id_ecommerce', how='left')
+    ped_eco = ped_eco.merge(dim_cliente[dim_cliente['id_ecommerce'].notna()],
+                            left_on='id_cliente_origem', right_on='id_ecommerce',
+                            how='left', validate='many_to_one')
 
-    # Fallback para cliente_sk caso algum id venha nulo ou sem correspondência
-    default_cliente_sk = dim_cliente['cliente_sk'].iloc[0]
-    ped_leg['cliente_sk'] = ped_leg['cliente_sk'].fillna(default_cliente_sk)
-    ped_eco['cliente_sk'] = ped_eco['cliente_sk'].fillna(default_cliente_sk)
+    # RDT-12: recuperar pelo CPF os IDs originais descartados na deduplicação.
+    # Não utilizar o primeiro cliente da dimensão como substituto arbitrário.
+    cad_leg = pd.read_sql('''
+        SELECT "ID_CLIENTE" AS id_cliente_origem, "CPF" AS cpf
+        FROM stg.legado_clientes
+    ''', eng)
+    cad_eco = pd.read_sql('''
+        SELECT customer_id AS id_cliente_origem, tax_id AS cpf
+        FROM stg.ecommerce_customer
+    ''', eng)
+    ped_leg = recuperar_clientes_por_cpf(ped_leg, cad_leg, dim_cliente, "LEGADO")
+    ped_eco = recuperar_clientes_por_cpf(ped_eco, cad_eco, dim_cliente, "ECOM")
 
     ped_leg['data_pedido_sk'] = pd.to_datetime(ped_leg['dt_pedido']).dt.date
     ped_leg['data_entrega_sk'] = pd.to_datetime(ped_leg['dt_entrega']).dt.date
