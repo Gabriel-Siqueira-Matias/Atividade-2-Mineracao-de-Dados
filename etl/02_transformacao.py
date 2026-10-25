@@ -21,6 +21,7 @@ import pandas as pd
 from config import eng_dw
 from qualidade.assercoes import Suite
 from sqlalchemy import text
+from time import perf_counter
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +263,7 @@ def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
     pedidos.loc[pendentes, "cliente_sk"] = cpfs_pendentes.map(sk_por_cpf)
 
     recuperados = n_pendentes - int(pedidos["cliente_sk"].isna().sum())
-    print(f"\n[OK] {sistema}: {recuperados}/{n_pendentes} pedidos recuperados por CPF")
+    print(f"[OK] {sistema}: {recuperados}/{n_pendentes} pedidos recuperados por CPF")
     restantes = int(pedidos["cliente_sk"].isna().sum())
     if restantes:
         raise ValueError(
@@ -324,11 +325,18 @@ def conforma_valores(qa):
 
     # Legado
     ped_leg = pd.read_sql('SELECT "ID_PEDIDO" as id_pedido, "ID_CLIENTE" as id_cliente, "STATUS" as status_origem, "VALOR_FRETE" as valor_frete, "DT_PEDIDO" as dt_pedido, "DT_ENTREGA" as dt_entrega FROM stg.legado_pedidos', eng)
-    item_leg = pd.read_sql('SELECT "ID_PEDIDO" as id_pedido, "QTD" as qtd, "VL_UNITARIO" as vl_unitario, "VL_DESCONTO" as vl_desconto FROM stg.legado_itens_pedido', eng)
-    
-    item_leg['vl_desconto'] = item_leg['vl_desconto'].apply(lambda x: 0 if x < 0 else x) # Sentinela -1
-    item_leg['valor_mercadoria'] = item_leg['qtd'] * item_leg['vl_unitario']
-    agg_leg = item_leg.groupby('id_pedido').agg({'valor_mercadoria': 'sum', 'vl_desconto': 'sum', 'qtd': 'sum'}).rename(columns={'qtd': 'qtd_itens'}).reset_index()
+    # Mesma agregação anterior, agora executada no PostgreSQL (menos memória/RAM).
+    inicio_itens = perf_counter()
+    agg_leg = pd.read_sql("""
+        SELECT "ID_PEDIDO" AS id_pedido,
+               COALESCE(SUM("QTD"::numeric * "VL_UNITARIO"::numeric), 0) AS valor_mercadoria,
+               COALESCE(SUM(CASE WHEN "VL_DESCONTO"::numeric < 0 THEN 0
+                        ELSE "VL_DESCONTO"::numeric END), 0) AS vl_desconto,
+               COALESCE(SUM("QTD"::integer), 0) AS qtd_itens
+        FROM stg.legado_itens_pedido
+        GROUP BY "ID_PEDIDO"
+    """, eng)
+    print(f"[tempo] Agregação itens LEGADO: {perf_counter()-inicio_itens:.1f}s ({len(agg_leg)} pedidos)")
     
     ped_leg = ped_leg.merge(agg_leg, on='id_pedido', how='left')
     ped_leg['valor_frete'] = ped_leg['valor_frete'].abs()
@@ -344,10 +352,16 @@ def conforma_valores(qa):
 
     # E-commerce
     ped_eco = pd.read_sql("SELECT order_id, customer_id, status as status_origem, freight_amount, placed_at, delivered_at FROM stg.ecommerce_orders", eng)
-    item_eco = pd.read_sql("SELECT order_id, quantity, unit_price, discount FROM stg.ecommerce_order_item", eng)
-
-    item_eco['valor_mercadoria'] = item_eco['quantity'] * item_eco['unit_price']
-    agg_eco = item_eco.groupby('order_id').agg({'valor_mercadoria': 'sum', 'discount': 'sum', 'quantity': 'sum'}).rename(columns={'quantity': 'qtd_itens'}).reset_index()
+    inicio_itens = perf_counter()
+    agg_eco = pd.read_sql("""
+        SELECT order_id,
+               COALESCE(SUM(quantity::numeric * unit_price::numeric), 0) AS valor_mercadoria,
+               COALESCE(SUM(discount::numeric), 0) AS discount,
+               COALESCE(SUM(quantity::integer), 0) AS qtd_itens
+        FROM stg.ecommerce_order_item
+        GROUP BY order_id
+    """, eng)
+    print(f"[tempo] Agregação itens ECOM: {perf_counter()-inicio_itens:.1f}s ({len(agg_eco)} pedidos)\n")
     
     ped_eco = ped_eco.merge(agg_eco, on='order_id', how='left')
     ped_eco['valor_frete'] = ped_eco['freight_amount'].abs()
@@ -403,7 +417,10 @@ def conforma_valores(qa):
 
     with eng.begin() as conn:
         conn.execute(text("TRUNCATE TABLE dw.fato_pedido CASCADE;"))
-    fato_final.to_sql('fato_pedido', eng, schema='dw', if_exists='append', index=False)
+    inicio_gravacao = perf_counter()
+    fato_final.to_sql('fato_pedido', eng, schema='dw', if_exists='append',
+                      index=False, chunksize=10_000)
+    print(f"\n[tempo] Escrita fato_pedido: {perf_counter()-inicio_gravacao:.1f}s ({len(fato_final)} pedidos)")
 
 
 # ===========================================================================
@@ -527,14 +544,23 @@ def liga_sac_e_avaliacoes(qa):
 
 if __name__ == "__main__":
     qa = Suite(etapa="02_transformacao")
-    unifica_clientes(qa)
-    conforma_status(qa)
-    conforma_valores(qa)
-    conforma_categorias(qa)
-    trata_datas_e_ausencias(qa)
-    liga_sac_e_avaliacoes(qa)
+    inicio_total = perf_counter()
+    print("\nIniciando Etapa 2 - Transformação")
+    etapas = (
+        ("Unificação de clientes", unifica_clientes),
+        ("Conformação de status", conforma_status),
+        ("Valores e fato_pedido", conforma_valores),
+        ("Categorias e produtos", conforma_categorias),
+        ("Datas e ausências", trata_datas_e_ausencias),
+        ("Vínculos SAC/avaliações", liga_sac_e_avaliacoes),
+    )
+    for nome, funcao in etapas:
+        inicio_etapa = perf_counter()
+        funcao(qa)
+        print(f"[tempo] {nome}: {perf_counter()-inicio_etapa:.1f}s")
 
     # Asserções
+    inicio_qa = perf_counter()
     eng = eng_dw()
     with eng.connect() as cx:
         # 1 — Sem CPF válido repetido entre os clientes conformados.
@@ -625,3 +651,5 @@ if __name__ == "__main__":
     if qa.imprimir():
         print("Há asserções em falha. Isso não impede seguir, mas precisa "
               "aparecer no RDT com explicação.")
+    print(f"[tempo] Asserções e registro: {perf_counter()-inicio_qa:.1f}s")
+    print(f"[tempo] ETAPA 2 COMPLETA: {perf_counter()-inicio_total:.1f}s\n")

@@ -114,7 +114,7 @@ def carrega_fato_item_pedido(engine, esperados):
         JOIN dw.fato_pedido p ON p.sistema_origem = 'ECOM' AND p.id_origem = 'ECOM-' || i.order_id::text
         JOIN dw.dim_produto pr ON pr.id_ecommerce = i.product_id;
     """))
-    print(f"[tempo] Inserção dos itens ECOM: {perf_counter() - t0:.1f}s", flush=True)
+    print(f"[tempo] Inserção dos itens ECOM: {perf_counter() - t0:.1f}s\n", flush=True)
     # Reutiliza a contagem de órfãos feita em carrega_fato_item(qa):
     # evita refazer duas junções grandes (1,39 milhão de registros) só para contar.
     inseridos = cx.execute(text("SELECT COUNT(*) FROM dw.fato_item_pedido")).scalar_one()
@@ -241,10 +241,10 @@ def carrega_fatos_auxiliares(qa):
     cx = qa.conexao
     t0 = perf_counter()
     carrega_fato_atendimento(cx)
-    print(f"[tempo] Atendimento: {perf_counter() - t0:.1f}s", flush=True)
+    print(f"[tempo] Atendimento: {perf_counter() - t0:.1f}s\n", flush=True)
     t0 = perf_counter()
     carrega_fato_avaliacao(cx)
-    print(f"[tempo] Avaliações: {perf_counter() - t0:.1f}s", flush=True)
+    print(f"[tempo] Avaliações: {perf_counter() - t0:.1f}s\n", flush=True)
 
 
 
@@ -302,6 +302,7 @@ if __name__ == "__main__":
     dw = eng_dw()
     qa = Suite(etapa="03_carga_dw")
     inicio = perf_counter()
+    print("\nIniciando Etapa 3 - Carga dw")
     # Uma transação para a carga integral: qualquer erro reverte tudo.
     with dw.begin() as cx:
         qa.conexao = cx
@@ -315,13 +316,13 @@ if __name__ == "__main__":
             TRUNCATE TABLE dw.fato_item_pedido, dw.fato_atendimento,
                            dw.fato_avaliacao RESTART IDENTITY
         """))
-        print(f"[tempo] Preparação das fatos: {perf_counter() - t0:.1f}s", flush=True)
+        print(f"[tempo] Preparação das fatos: {perf_counter() - t0:.1f}s\n", flush=True)
         t0 = perf_counter()
         carrega_fato_item(qa)
-        print(f"[tempo] Itens: {perf_counter() - t0:.1f}s", flush=True)
+        print(f"[tempo] Itens: {perf_counter() - t0:.1f}s\n", flush=True)
         t0 = perf_counter()
         carrega_fatos_auxiliares(qa)
-        print(f"[tempo] SAC e avaliações: {perf_counter() - t0:.1f}s", flush=True)
+        print(f"[tempo] SAC e avaliações: {perf_counter() - t0:.1f}s\n", flush=True)
 
         t0 = perf_counter()
         # 3.5 — as quatro asserções obrigatórias do professor:
