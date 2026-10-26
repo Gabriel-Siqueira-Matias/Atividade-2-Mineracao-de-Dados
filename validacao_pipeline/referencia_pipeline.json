@@ -1,0 +1,57 @@
+{
+  "contagens": {
+    "abt.recompra_90d": 108064,
+    "abt.recompra_90d_vazamento": 108064,
+    "dw.dim_canal": 3,
+    "dw.dim_cliente": 115674,
+    "dw.dim_produto": 15000,
+    "dw.dim_status": 9,
+    "dw.fato_atendimento": 95000,
+    "dw.fato_avaliacao": 160000,
+    "dw.fato_item_pedido": 1371876,
+    "dw.fato_pedido": 410000,
+    "stg.atendimentos_sac": 96140,
+    "stg.avaliacoes_marketplace": 160000,
+    "stg.ecommerce_category": 21,
+    "stg.ecommerce_customer": 85000,
+    "stg.ecommerce_order_item": 995367,
+    "stg.ecommerce_orders": 280000,
+    "stg.ecommerce_product": 12000,
+    "stg.legado_clientes": 47250,
+    "stg.legado_itens_pedido": 397086,
+    "stg.legado_pedidos": 130000,
+    "stg.legado_produtos": 3000
+  },
+  "csv": {
+    "abt_recompra_correta.csv": {
+      "colunas": 18,
+      "features": 15,
+      "linhas": 108064,
+      "positivos": 24043,
+      "sha256_ordenado_cliente_sk": "c36acb81a17e5d423a5c765cad6c6fc432e1bc5e145466693eccce22c5da6615"
+    },
+    "abt_recompra_vazamento.csv": {
+      "colunas": 18,
+      "features": 15,
+      "linhas": 108064,
+      "positivos": 24043,
+      "sha256_ordenado_cliente_sk": "11e85cdacc3b78c78dc07d7e09189e4fcb45372ab8981faa74777ec8389479cb"
+    }
+  },
+  "esperados_escala": "ESCALA=1.0",
+  "indicadores": {
+    "abt.recompra_90d_positivos": 24043,
+    "abt.recompra_90d_vazamento_positivos": 24043,
+    "avaliacoes_sem_pedido": 0,
+    "recencias_negativas_abt_correta": 0,
+    "sac_sem_pedido": 0
+  },
+  "qa": {
+    "01_extracao": 11,
+    "02_transformacao": 4,
+    "03_carga_dw": 4,
+    "04_abt_correta": 5,
+    "04_abt_vazamento": 4
+  },
+  "versao": 1
+}

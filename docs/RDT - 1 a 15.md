@@ -1,14 +1,14 @@
 # **Mercatto Varejo — Registro de Decisões de Transformação (RDT)**
 
-**RDT-01 a RDT-13  \|  SEMANAS 2 E 3**
+**RDT-01 a RDT-15  \|  SEMANAS 2, 3 E 4**
 
 **Equipe:** Gabriel Siqueira Matias (2023278440020); Krystyan Douglas Santos Costa (2023278440026); Pedro Alexandre Souza de Campos (2023278440034)
 
 **Disciplina:** Mineração de Dados — IFMT
 
-**Data de consolidação:** 23/10/2026
+**Data de consolidação:** XX/10/2026
 
-**Versão do pipeline:** 02\_transformacao.py \+ 03\_carga\_dw.py
+**Versão do pipeline:** 02\_transformacao.py \+ 03\_carga\_dw.py \+ 04\_abt.py
 
 **Repositorio do github:**
 
@@ -16,11 +16,9 @@ https\://github.com/Gabriel-Siqueira-Matias/Atividade-2-Mineracao-de-Dados
 
 # **Finalidade e critérios do registro**
 
-Este documento reúne as fichas obrigatórias RDT-01 a RDT-13, respeitando o padrão do professor: evidência quantificada; alternativas; decisão; justificativa; informação perdida; quantidade e percentual afetados; e asserção ou conferência associada.
+Este documento reúne as fichas obrigatórias RDT-01 a RDT-15, respeitando o padrão do professor: evidência quantificada; alternativas; decisão; justificativa; informação perdida; quantidade e percentual afetados; e asserção ou conferência associada.
 
-Os resultados observados durante a execução atual são distinguidos das auditorias anteriores e de decisões ainda não implementadas. As RDT-14 e 15 pertencem à Semana 4 e não foram acrescentadas.
-
-Correção importante de índice: RDT-06 documenta frete negativo e desconto −1; RDT-09 documenta fuso horário, conforme o modelo oficial. A versão anterior do grupo usava outros assuntos nesses números.
+Os resultados observados durante a execução atual são distinguidos das auditorias anteriores e de decisões ainda não implementadas. As RDT-­14 e RDT­-15 registram as decisões da Semana 4 e o experimento de vazamento, a RDT-10 a RDT-14 é referente a semana 3 e as demais RDTS (1 a 9\) são ligadas a semana 2\.
 
 # **Resumo da execução verificada**
 
@@ -336,7 +334,7 @@ Correção importante de índice: RDT-06 documenta frete negativo e desconto −
 
 **3\. Criar pedido sintético.** preserva FK preenchida, mas introduz um pedido inexistente.
 
-**Decisão:** Alternativa 2 IMPLEMENTADA: SAC localiza o pedido com o sistema \+ ID (LEG- ou ECOM-), consolida em um protocolo por linha; avaliações ligam order\_ref a id\_origem. A referência à fato de pedido tem prioridade sobre um pareamento pelo CPF do atendimento.
+**Decisão:** Alternativa 2 IMPLEMENTADA: SAC localiza o pedido com o sistema \+ ID (LEG- ou ECOM-), consolida em um protocolo por linha; avaliações ligam order\_ref a id\_origem. A referência ao fato de pedido tem prioridade sobre um pareamento pelo CPF do atendimento.
 
 **Justificativa:** A etapa preserva informação quando a referência está ausente, e o esquema permite pedido\_sk nulo nas fatos auxiliares. Na execução informada, nenhuma referência ficou sem pedido.
 
@@ -344,30 +342,117 @@ Correção importante de índice: RDT-06 documenta frete negativo e desconto −
 
 **Registros afetados:** SAC: 95.000/95.000 protocolos ligados (100%), 0 sem pedido; 1.140/96.140 linhas brutas (1,19%) não repetidas na fato. Marketplace: 160.000/160.000 reviews ligados (100%), 0 sem pedido.
 
-**Asserção associada:** Auditoria automática após o COMMIT: auxiliares sem pedido (SAC=0, avaliações=0), contagens 95.000 e 160.000 e 4/4 asserções da carga aprovadas. Essa conferência de vínculo é complementar ao TODO 3.5.
+**Asserção associada:** Auditoria automática após o COMMIT: auxiliares sem pedido (SAC=0, avaliações=0), contagens 95.000 e 160.000 e 4/4 asserções da carga aprovadas. Essa conferência de vínculo é complementar ao 3.5.
 
-# **Tabela-resumo das RDT-01 a RDT-13**
+**RDT-14 \| Desenho dos atributos da ABT e verificação de ausência de vazamento**  
+**Etapa do pipeline:** 04\_abt.py — SQL\_ALVO, SQL\_ATRIBUTOS\_CORRETOS, monta\_atributos\_corretos e verifica\_amostra\_corte.
 
-| Ficha | Decisão | Registros afetados | % da base | Informação perdida? |
+**O que o dado mostrava:** A dimensão contém 115.674 clientes. Destes, 108.064 (93,42%) possuem ao menos um pedido até 30/06/2025 e formam a população da ABT; 7.610 (6,58%) não entram nessa população. Na janela de 01/07 a 28/09/2025, 24.043 clientes (22,25%) fizeram compra não cancelada e 84.021 (77,75%) não fizeram. O DW permite calcular histórico de compras, itens, SAC e avaliações; porém não oferece histórico completo de alterações de status/categoria.
+
+**Alternativas consideradas:**   
+**1\. Usar pedidos de todo o período ao calcular atributos.** Simplificaria agregações, mas faria as features conhecerem compras ocorridas após a data da previsão.   
+**2\. Construir uma linha por cliente elegível e limitar os atributos preditivos a eventos até 30/06/2025.** Preserva a cronologia exigida e separa as compras futuras para formar apenas o alvo.  
+**3\. Utilizar apenas características cadastrais atuais e todas as sugestões do professor, inclusive o canal predominante.** Seria simples, mas perderia comportamento transacional e poderia carregar informações pós-corte ou canal impreciso. 
+
+**Decisão:** Alternativa 2, implementada. Foram selecionadas 15 features históricas (10 sugestões aplicáveis \+ 5 adicionais). O grão é um cliente\_sk por linha; cliente\_sk e data\_corte ficam como metadados e alvo\_recompra\_90d como classe binária. Compras na janela futura definem exclusivamente o alvo. Não foi utilizado canal\_predominante, porque a dimensão de canais está simplificada em três registros e não comprova o canal real de cada pedido.
+
+**Justificativa:** Atributos históricos capturam recência, frequência, valor, variedade, regularidade, atendimento e satisfação, enquanto a separação temporal evita a forma explícita de vazamento por compra futura. As cinco features adicionais aumentam a variedade de hipóteses testadas sem depender de fontes novas. O corte é inclusivo (p.data\_pedido\_sk ≤ 30/06/2025).
+
+**As 15 features e suas regras:**
+
+| Feature  | Regra aplicada  | Ausência ou restrição |
+| :---- | ----- | ----- |
+| recencia\_dias  | Dias desde a última compra não cancelada até o corte.  | NULL se não houve  compra válida. |
+| frequencia\_pedidos  | Pedidos não cancelados até o corte.  | 0 se nenhuma compra válida. |
+| valor\_monetario  | Soma de valor\_total dos pedidos não cancelados.  | 0 se sem compras válidas. |
+| ticket\_medio  | Média do valor\_total dos pedidos não cancelados.  | NULL se não há compras válidas. |
+| prazo\_medio\_entrega  | Média de dias\_entrega dos concluídos e entregues até o corte. | NULL se sem prazo  válido. |
+| taxa\_cancelamento  | Pedidos cancelados / total de pedidos históricos.  | Proporção entre 0 e 1\. |
+| categorias\_distintas  | Categorias nível 1 distintas em itens vinculados a pedidos válidos. | 0 quando não existem itens elegíveis. |
+| qtd\_atendimentos\_sac  | Quantidade de protocolos abertos até o corte por cliente\_sk.  | 0 se sem atendimento. |
+| nota\_media\_avaliacoes  | Média das avaliações com data e pedido até o corte.  | NULL se sem nota  observada. |
+| tempo\_como\_cliente  | Dias entre a primeira compra histórica e o corte.  | Inclui primeira compra  cancelada. |
+| pedidos\_ultimos\_90d  | Pedidos válidos nos 90 dias encerrados em 30/06/2025.  | 0 se sem compras nesse período. |
+| intervalo\_medio\_compras  | (Última data − primeira data)/(nº de pedidos válidos − 1).  | NULL se menos de duas compras. |
+| qtd\_total\_itens  | Soma de quantidade dos itens vinculados a compras válidas.  | 0 se sem itens elegíveis. |
+| desvio\_valor\_pedidos  | Desvio padrão amostral de valor\_total das compras válidas.  | NULL com menos de duas compras. |
+| dias\_desde\_ultimo\_sac  | Dias desde a última abertura de SAC até o corte.  | NULL se sem SAC  anterior. |
+
+**As 15 features e suas regras**
+
+**O que se perde:** A ABT agrega transações em uma linha por consumidor e não reproduz cada evento individual. Exclui atributos derivados de compras posteriores ao corte e deixa fora 7.610 clientes sem pedido anterior, de modo que o modelo não representa “clientes novos” sem histórico. Onde não existe média ou intervalo observável, usa NULL, não zero. A exclusão de canal\_predominante abdica de uma informação potencialmente útil. Status e categorias do DW são fotografias atuais: caso tenham mudado depois de 30/06/2025, o código não possui versionamento que prove sua disponibilidade histórica.
+
+**Registros afetados: 108.064/115.674 clientes** (93,42% da dimensão) formam a ABT; **7.610** (6,58%) ficam fora do grão elegível. São 108.064 linhas × 15 atributos preditivos, 2 metadados e 1 alvo \= **18 colunas** em cada CSV; taxa positiva 24.043/108.064 (22,25%). Não foi quantificada por atributo a quantidade específica de NULL no arquivo de 18 colunas.
+
+**Asserção associada:** A versão correta executou **5/5 asserções aprovadas**: faixa de taxa do alvo \[2%; 60%\]; unicidade de cliente\_sk; cardinalidade da junção alvo × atributos (108.064); ausência de nulos em frequencia\_pedidos; e conferência independente de recência/frequência em **amostra determinística de 100 clientes**, com zero divergências. A última asserção não valida exaustivamente todas as 15 features nem a historicidade de status/categorias.
+
+**RDT-15 \| Vazamentos deliberados na versão de comparação**   
+**Etapa do pipeline:** 04\_abt.py — monta\_atributos\_com\_vazamento; 05\_exportar\_orange.py; fluxos Orange (Test & Score, Confusion Matrix e ROC Analysis).
+
+**O que o dado mostrava:** A ABT correta apresentava 108.064 clientes, 15 features e 22,25% de recompra. No teste externo estratificado 70/30, com 32.419 clientes (25.206 classe 0; 7.213 classe 1), os modelos obtiveram AUC modesta (Tree 0,496; Logistic Regression 0,578; Naive Bayes 0,570). O enunciado determina criar um contraexemplo com duas features calculadas sobre a base inteira mais normalização feita antes da divisão treino/teste.
+
+**Alternativas consideradas:**   
+**1\. Manter todos os atributos com o corte e ajustar normalização apenas no treino.** É metodologicamente correto, porém não fornece o contraexemplo solicitado.  
+**2\. Introduzir explicitamente dois vazamentos temporais e uma normalização global pré-partição, mantendo alvo, população e demais features iguais à versão correta.** Permite medir o contraste, assumidamente inválido para produção.  
+**3\. Inserir diretamente o alvo entre as features.** Elevaria artificialmente o resultado, mas tornaria o erro trivial e não refletiria os mecanismos solicitados.
+
+**Decisão:** Alternativa 2, implementada. (1) recencia\_dias usa a última compra não cancelada de toda a fato\_pedido, inclusive após 30/06/2025; pode ficar negativa em relação ao corte. (2) frequencia\_pedidos conta todas as compras não canceladas, inclusive futuras. (3) valor\_monetario permanece somado apenas até o corte, mas é substituído por z-score calculado com média e desvio padrão dos 108.064 clientes antes do particionamento. As outras 12 features, o alvo e a população são mantidos.
+
+**Justificativa:** A comparação evidencia que medir a qualidade de um modelo sem examinar quando cada atributo fica disponível pode premiar uma solução inviável em uso real. A normalização global foi introduzida deliberadamente para avaliar separadamente um vazamento menos óbvio: estatísticas do teste utilizadas na preparação dos dados.
+
+**Resultado do experimento principal no Orange**
+
+| Modelo | AUC correta | AUC vazamento | BA correta | BA vazamento |
 | :---- | :---- | :---- | :---- | :---- |
-| RDT-01 | Carga completa | 2.205.864 | 100% | Histórico prévio do staging |
-| RDT-02 | CPF válido \+ nome/localidade 1:1 | 132.250 cadastros; 115.674 dimensões | 100% / redução 12,53% | Risco residual de pareamento |
-| RDT-03 | Deduplicar CPFs válidos ERP | 2.604 cadastros; 1.302 IDs excedentes | 5,51% / 2,76% ERP | IDs secundários na dimensão |
-| RDT-04 | Nove status conformados | 410.000 pedidos | 100% | Especificidade operacional agregada |
-| RDT-05 | Normalização do total financeiro | 410.000 pedidos; 4.003 divergências tratadas | 100% / 3,08% ERP | Semântica bruta do total na fato |
-| RDT-06 | abs(frete); sentinela −1 → 0 | 1.174 fretes; 4.056 itens ERP | 0,29% pedidos / 1,02% itens ERP | Sinal do frete e código sentinela |
-| RDT-07 | Categoria nível 1/OUTROS | 15.000 produtos; 661 ERP ambíguos | 100% / 22,03% ERP | Granularidade da categoria |
-| RDT-08 | NULL para ausência/data inválida | 101.604 ausências; 3.483 datas inválidas | 24,78% / 0,85% pedidos | Prazos e causas não observados |
-| RDT-09 | UTC parcial; fuso indefinido documentado | 46.530 pedidos ECOM; 31.915 reviews sem fuso | 16,62% ECOM / 19,95% reviews | Instante/offset ao reduzir a DATE |
-| RDT-10 | Órfãos retidos em stg | 20.577 itens | 1,48% dos itens | Itens ausentes da fato |
-| RDT-11 | Grão pedido e item separados | 410.000 pedidos; 1.371.876 itens | 100% / 98,52% | IDs naturais das linhas de item |
-| RDT-12 | Vincular ID e recuperar por CPF único | 4.290 pedidos recuperados | 1,05% dos pedidos | ID secundário não persistido na dimensão |
-| RDT-13 | LEFT JOIN; consolidar por protocolo | 95.000 SAC \+ 160.000 avaliações; 1.140 linhas extras | 100% vinculados / 1,19% SAC não repetido | Linhas repetidas SAC na fato |
+| Tree  | 0,496  | 0,965  | 51,19%  | 94,73% |
+| Logistic Regression  | 0,578  | 0,873  | 50,06%  | 65,23% |
+| Naive Bayes  | 0,570  | 0,878  | 52,35%  | 78,01% |
 
-# **Reflexão final**
+BA \= acurácia balanceada \= (sensibilidade da classe 1 \+ especificidade da classe 0)/2, calculada a partir das matrizes de confusão. AUC extraída do Test & Score. Diferenças máximas: Tree \+0,469 de AUC e \+43,54 pontos percentuais de BA.
 
-**1\. Qual decisão mudaria mais o resultado de um modelo?** A unificação da identidade do cliente (RDT-02/03/12). A frequência e a recência de compras seriam distorcidas se registros do mesmo cliente fossem separados ou se clientes diferentes fossem fundidos. O laboratório evidenciou o risco: 4.290 pedidos foram inicialmente imputados a um único cliente real por fallback; após a correção, todos obtiveram vínculo técnico por CPF único. O impacto no desempenho de um modelo de recompra não foi medido nesta etapa e permanece hipótese.
+**Controle complementar: efeito isolado da normalização**
 
-**2\. Que conveniência técnica afetaria pessoas reais?** A imputação do primeiro cliente como substituto para pedidos não identificados poderia atribuir compras a terceiros. Também a classificação de cancelamentos, fretes negativos e ausência de satisfação pode afetar decisões de negócio e reputação se apresentada como verdade sem ressalvas.
+| Modelo  | AUC treino  | AUC global  | BA treino  | BA global |
+| :---- | :---- | :---- | :---- | :---- |
+| Tree  | 0,509  | 0,509  | 51,3778%  | 51,3778% |
+| Logistic Regression  | 0,577  | 0,577  | 50,1108%  | 50,1128% |
+| Naive Bayes  | 0,565  | 0,565  | 52,8407%  | 52,8407% |
 
-**3\. Qual informação fez falta?** Um identificador universal de consumidor entre sistemas, uma trilha persistente de todos os IDs de origem, a causa dos fretes negativos/descontos-sentinela e metadados de fuso para os timestamps sem offset. Essas limitações foram explicitadas em vez de escondidas por imputações.
+No teste controlado, treino e teste têm 75.645 e 32.419 clientes idênticos nas duas variantes. Somente valor\_monetario muda de padronização. As AUCs são iguais nas três casas exibidas; na Logistic Regression a BA aumenta aproximadamente 0,0020 p.p., com um falso positivo a menos; Tree e Naive Bayes têm matrizes idênticas. Portanto, não houve ganho perceptível da normalização isolada neste conjunto.
+
+**O que se perde:** Na versão contaminada, recência e frequência deixam de representar informação disponível no instante da predição; a aparente capacidade de generalização ao futuro perde validade operacional. O z-score global perde a escala monetária diretamente interpretável, embora o valor bruto permaneça na ABT correta e no DW. A melhora conjunta não pode ser atribuída individualmente a uma das duas features futuras sem outra ablação. Uma normalização pré-partição pode causar vazamento mesmo sem efeito mensurável na AUC.
+
+**Registros afetados:** 108.064/108.064 clientes (100%) têm valor\_monetario padronizado globalmente na ABT com vazamento; recência e frequência são recalculadas para os mesmos 108.064 clientes, mas nem todas necessariamente mudam de valor. Uma auditoria anterior das duas features temporais, ainda no conjunto de 10 features, encontrou 43.262/108.064 linhas (40,03%) com valores alterados; essa contagem específica não foi reapurada no CSV final de 15 features. A avaliação utilizou 32.419 clientes (30% da ABT) e registrou diferenças quantitativas na AUC e BA acima. 
+
+**Asserção associada:** As duas ABTs passaram seus controles estruturais: versão correta 5/5 e versão com vazamento 4/4 asserções. Na contaminada não se executa a verificação de corte da versão correta, pois a violação é proposital. A verificação de ausência de vazamento é garantida apenas na amostra temporal da versão correta e em inspeção do SQL; a comparação de desempenho foi observada no Orange, não em asserção do banco.
+
+**Tabela-resumo das RDT-01 a RDT-15**
+
+| Ficha  | Decisão  | Registros afetados  | % da base  | Informação  perdida? |
+| :---- | ----- | ----- | ----- | ----- |
+| RDT-01  | Extração integral em lotes  | 2.205.864 linhas  | 100%  | Versões antigas do staging |
+| RDT-02  | CPF válido \+ nome/localidade 1:1 | 132.250 cadastros; 115.674 na dimensão | 12,53% redução  | Risco de pareamento |
+| RDT-03  | Deduplicar CPF legado  | 2.604 cadastros; 1.302  excedentes | 5,51% / 2,76%  | IDs secundários na dimensão |
+| RDT-04  | Nove status conformados  | 410.000 pedidos  | 100%  | Especificidade ao  agregar |
+| RDT-05  | Recompor total financeiro  | 410.000; 4.003 ERP corrigidos  | 100% / 3,08%  ERP | Semântica bruta na fato |
+| RDT-06  | abs(frete); desconto \-1→0  | 1.174 fretes; 4.056 itens  | 0,29% / 1,02%  | Sinal e sentinela |
+| RDT-07  | Categoria nível 1/OUTROS  | 15.000 produtos; 661 ambíguos ERP | 100% / 22,03%  ERP | Detalhe da categoria |
+| RDT-08  | NULL para dados  ausentes/inválidos | 101.604 ausências; 3.483  inválidas | 24,78% / 0,85%  | Prazos sem base  confiável |
+| RDT-09  | Política UTC parcial  documentada | 46.530 pedidos; 31.915 reviews sem fuso | 16,62% / 19,95%  | Hora/offset ou  ambiguidade |
+| RDT-10  | Órfãos permanecem em STG  | 20.577 itens  | 1,48% dos itens  | Itens ausentes da  fato |
+| RDT-11  | Grãos pedido e item separados  | 410.000 pedidos; 1.371.876 itens  | 100% / 98,52%  | ID natural da linha de item |
+| RDT-12  | Recuperar SK por CPF único  | 4.290 pedidos  | 1,05% dos  pedidos | IDs secundários não persistidos |
+| RDT-13  | LEFT JOIN e protocolo único SAC | 95.000 SAC; 160.000 avaliações; 1.140 duplicações | 100% ligados;  1,19% SAC | Linhas SAC não  repetidas |
+| RDT-14  | ABT histórica em 15 features  | 108.064 elegíveis; 7.610 excluídos  | 93,42% / 6,58% clientes | Detalhe transacional e histórico de  versões |
+| RDT-15  | 2 features futuras \+ z-score global | 108.064 valores monetários  normalizados | 100% da ABT  | Validade temporal  das previsões |
+
+Os valores das RDT-01 a RDT-13 foram preservados da consolidação do grupo; os números da Semana 4 vêm da execução das ABTs e dos resultados do Orange. Na RDT-15, 100% indica o z-score global, não que todas as recências/frequências tenham mudado.
+
+**Reflexão final**  
+**1\. Qual decisão mudaria mais o resultado de um modelo? Vocês testaram ou é hipótese?** O experimento da RDT-15 foi diretamente medido: ao expor recência e frequência a compras posteriores ao corte e normalizar globalmente, a AUC da Tree aumentou de 0,496 para 0,965, e sua acurácia balanceada passou de 51,19% a 94,73%. É um aumento real na avaliação, mas inválido como previsão prospectiva. Outra decisão crítica é a unificação de clientes (RDT-02/03/12): 4.290 pedidos estavam associados indevidamente ao primeiro cliente da dimensão; a correção foi auditada, mas seu efeito isolado na AUC não foi medido.
+
+**2\. Qual decisão por conveniência técnica afetaria pessoas reais?** O fallback arbitrário para um cliente real poderia distorcer frequência e histórico de consumo, atribuindo compras de terceiros a uma pessoa identificável. O uso de dados futuros no modelo também poderia sugerir capacidade de previsão inexistente e motivar ações comerciais indevidas. Reclassificação de cancelamentos, sinais de frete e médias com ausência de informação exigem explicação, porque uma simplificação técnica pode ser interpretada como fato sobre o cliente.
+
+**3\. Qual informação fez falta?** Um identificador universal e uma trilha integral dos IDs descartados na deduplicação; histórico de mudanças de status e categorias para reconstruir a visão exatamente como era em 30/06/2025; canais realmente observados por pedido; timestamps com fuso explícito; e motivos reais de frete negativo e sentinelas. Essas limitações foram documentadas para não confundir a integridade do banco com validade temporal ou semântica das análises.
+
+**Nota metodológica:** a comparação isolada da normalização apontou efeito não perceptível na AUC (três casas decimais). Isso não torna adequado usar estatísticas do conjunto de testes ao preparar um classificador. A escolha segura é ajustar quaisquer parâmetros de pré-processamento somente no treinamento e aplicar a transformação ajustada ao teste.

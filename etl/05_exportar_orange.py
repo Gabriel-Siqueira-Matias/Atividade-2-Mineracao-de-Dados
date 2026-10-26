@@ -68,6 +68,7 @@ def exporta(tabela, arquivo, dw):
 if __name__ == "__main__":
     os.makedirs(DIR_SAIDA, exist_ok=True)
     dw = eng_dw()
+    print("\nIniciando Etapa 5 - Exportar orange")
     print("exportando para o Orange:")
     exporta("recompra_90d", "abt_recompra_correta.csv", dw)
     exporta("recompra_90d_vazamento", "abt_recompra_vazamento.csv", dw)
