@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Auditoria SOMENTE LEITURA posterior aos seis comandos do professor.
+"""Auditoriar posterior aos seis comandos do professor.
 
 Uso (executado automaticamente pelo .ps1):
     python -u auditar_pipeline.py --desde-id 123
 
-Cria /saida/auditoria_pipeline.json para comparação com uma execução futura.
+Cria /saida/auditoria_pipeline.json.
 Não modifica as tabelas do ETL nem substitui as asserções oficiais.
 """
 
@@ -15,7 +15,6 @@ import hashlib
 import json
 from collections import Counter
 from pathlib import Path
-
 from sqlalchemy import text
 from config import DIR_SAIDA, eng_dw
 
@@ -44,7 +43,7 @@ CONTAGENS = {
 }
 
 ETAPAS_QA = {
-    "01_extracao": 11,  # 4 ERP + 5 ECOM + SAC + avaliações
+    "01_extracao": 11,
     "02_transformacao": 4,
     "03_carga_dw": 4,
     "04_abt_correta": 5,

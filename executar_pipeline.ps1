@@ -1,10 +1,16 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
   Verifica a reexecução do pipeline Mercatto sem remover volumes nem arquivos de origem.
-  Execute da raiz do projeto: .\validar_pipeline_completo.ps1
+  Execute da raiz do projeto: .\executar_pipeline.ps1
   Os seis comandos principais seguem a ordem exigida pelo professor.
   Adicione /etl/auditar_pipeline.py como auditoria SOMENTE LEITURA posterior.
 #>
+# Windows PowerShell 5.1: interpretar corretamente o UTF-8 emitido pelo Docker/Python.
+# Nao modifica o conteudo do ETL nem os bancos.
+$utf8SemBOM = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8SemBOM
+$OutputEncoding = $utf8SemBOM
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Set-Location $PSScriptRoot
@@ -22,11 +28,19 @@ $instante = Get-Date -Format 'yyyyMMdd-HHmmss'
 $log = Join-Path $pasta "execucao-$instante.log"
 $cronometroTotal = [Diagnostics.Stopwatch]::StartNew()
 
+# Logger compativel com PowerShell 5.1 que salva UTF-8 (sem BOM),
+# em vez do formato UTF-16 usado por Tee-Object nesta versao do PowerShell.
+function Gravar-Linha([string] $linha) {
+    [System.IO.File]::AppendAllText(
+        $script:log, $linha + [Environment]::NewLine, $script:utf8SemBOM
+    )
+    Write-Output $linha
+}
 function Escrever-Log([string] $mensagem) {
-    $mensagem | Tee-Object -FilePath $log -Append
+    Gravar-Linha $mensagem
 }
 function Docker-Exec([string[]] $argumentos) {
-    & docker @argumentos 2>&1 | Tee-Object -FilePath $log -Append
+    & docker @argumentos 2>&1 | ForEach-Object { Gravar-Linha ([string]$_) }
     $codigo = $LASTEXITCODE
     if ($codigo -ne 0) { throw "Docker falhou (exit $codigo): docker $($argumentos -join ' ')" }
 }
