@@ -1,101 +1,127 @@
 ﻿#requires -Version 5.1
 <#
-  Verifica a reexecução do pipeline Mercatto sem remover volumes nem arquivos de origem.
-  Execute da raiz do projeto: .\executar_pipeline.ps1
-  Os seis comandos principais seguem a ordem exigida pelo professor.
-  Adicione /etl/auditar_pipeline.py como auditoria SOMENTE LEITURA posterior.
+Uso normal (preserva volumes e dados):
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\executar_pipeline.ps1
+
+Reconstrução destrutiva, explicitamente autorizada:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\executar_pipeline.ps1 -ReconstruirDoZero -ConfirmarExclusao
+
+ATENÇÃO: a segunda opção executa docker compose down -v e apaga ./dados e ./saida.
+Não remove documentos, arquivos de código, dump_sql.zip nem validacao_pipeline/.
+Fazer backup antes. Não executar enquanto outra cópia do projeto estiver em uso.
 #>
-# Windows PowerShell 5.1: interpretar corretamente o UTF-8 emitido pelo Docker/Python.
-# Nao modifica o conteudo do ETL nem os bancos.
-$utf8SemBOM = [System.Text.UTF8Encoding]::new($false)
-[Console]::OutputEncoding = $utf8SemBOM
-$OutputEncoding = $utf8SemBOM
+param(
+    [switch]$ReconstruirDoZero,
+    [switch]$ConfirmarExclusao
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$utf8SemBOM = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8SemBOM
+$OutputEncoding = $utf8SemBOM
 Set-Location $PSScriptRoot
+
+if ($ConfirmarExclusao -and -not $ReconstruirDoZero) {
+    throw 'A flag -ConfirmarExclusao so pode ser usada com -ReconstruirDoZero.'
+}
+if ($ReconstruirDoZero -and -not $ConfirmarExclusao) {
+    throw 'RECONSTRUCAO CANCELADA. Para autorizar a exclusao de volumes e dados gerados, use -ReconstruirDoZero -ConfirmarExclusao.'
+}
 
 foreach ($arquivo in @('docker-compose.yml', 'etl/01_extracao.py', 'etl/02_transformacao.py',
                       'etl/03_carga_dw.py', 'etl/04_abt.py', 'etl/05_exportar_orange.py',
                       'etl/auditar_pipeline.py')) {
-    if (-not (Test-Path $arquivo)) { throw "Arquivo nao encontrado na raiz do projeto: $arquivo" }
+    if (-not (Test-Path -LiteralPath $arquivo -PathType Leaf)) {
+        throw "Arquivo obrigatorio nao encontrado: $arquivo"
+    }
 }
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker nao encontrado no PATH.' }
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    throw 'Docker nao encontrado no PATH.'
+}
 
-$pasta = Join-Path $PSScriptRoot 'validacao_pipeline'
-$pasta2 = Join-Path $PSScriptRoot 'saida'
-New-Item -ItemType Directory -Force -Path $pasta2 | Out-Null
+$pastaValidacao = Join-Path $PSScriptRoot 'validacao_pipeline'
+New-Item -ItemType Directory -Path $pastaValidacao -Force | Out-Null
 $instante = Get-Date -Format 'yyyyMMdd-HHmmss'
-$log = Join-Path $pasta2 "execucao-$instante.log"
+$log = Join-Path $pastaValidacao "execucao-$instante.log"
 $cronometroTotal = [Diagnostics.Stopwatch]::StartNew()
 
-# Logger compativel com PowerShell 5.1 que salva UTF-8 (sem BOM),
-# em vez do formato UTF-16 usado por Tee-Object nesta versao do PowerShell.
-function Gravar-Linha([string] $linha) {
-    [System.IO.File]::AppendAllText(
-        $script:log, $linha + [Environment]::NewLine, $script:utf8SemBOM
-    )
+function Gravar-Linha([string]$linha) {
+    [System.IO.File]::AppendAllText($script:log, $linha + [Environment]::NewLine, $script:utf8SemBOM)
     Write-Output $linha
 }
-function Escrever-Log([string] $mensagem) {
-    Gravar-Linha $mensagem
-}
-function Docker-Exec([string[]] $argumentos) {
+function Escrever-Log([string]$mensagem) { Gravar-Linha $mensagem }
+function Docker-Exec([string[]]$argumentos) {
     & docker @argumentos 2>&1 | ForEach-Object { Gravar-Linha ([string]$_) }
     $codigo = $LASTEXITCODE
     if ($codigo -ne 0) { throw "Docker falhou (exit $codigo): docker $($argumentos -join ' ')" }
 }
 
 try {
-    Escrever-Log '[INICIO] Auditoria de reexecucao do pipeline, SEM apagar volumes'
-    Docker-Exec @('compose','ps')
+    if ($ReconstruirDoZero) {
+        Escrever-Log '[ATENCAO] RECONSTRUCAO DO ZERO AUTORIZADA: volumes Docker, ./dados e ./saida serao excluidos.'
+        Escrever-Log '[INFO] Mantenha backup externo do DW, do dump SQL e dos CSVs, caso necessite preserva-los.'
+        Docker-Exec @('compose', 'down', '-v', '--remove-orphans')
+        foreach ($pastaGerada in @('dados', 'saida')) {
+            $caminho = Join-Path $PSScriptRoot $pastaGerada
+            if (Test-Path -LiteralPath $caminho) {
+                Escrever-Log "[LIMPEZA] Removendo ./$pastaGerada"
+                Remove-Item -LiteralPath $caminho -Recurse -Force -ErrorAction Stop
+            }
+            New-Item -ItemType Directory -Path $caminho -Force | Out-Null
+        }
+        Escrever-Log '[DOCKER] Recriando imagens, fontes e bancos de dados...'
+        Docker-Exec @('compose', 'up', '-d', '--build')
+        Escrever-Log '[DOCKER] Ambiente reconstruido; iniciando as seis etapas do professor.'
+    } else {
+        Escrever-Log '[INICIO] Auditoria de reexecucao do pipeline, SEM apagar volumes'
+    }
 
-    # Guardar a posição do QA ANTES de reexecutar, para identificar falhas desta tentativa.
+    Docker-Exec @('compose', 'ps')
+
+    # O gerador prepara o esquema qa antes da primeira etapa; registrar ID evita
+    # confundir assercoes de execucoes anteriores com a execucao atual.
     $idTexto = & docker compose exec -T etl python -c "from config import eng_dw; from sqlalchemy import text; e=eng_dw(); c=e.connect(); print(c.execute(text('SELECT COALESCE(MAX(id),0) FROM qa.execucao_assercao')).scalar_one()); c.close()"
     if ($LASTEXITCODE -ne 0 -or @($idTexto).Count -ne 1) {
-        throw 'Nao foi possivel determinar o ID inicial de qa.execucao_assercao.'
+        throw 'Nao foi possivel determinar o ID inicial de qa.execucao_assercao. Confira docker compose logs seed.'
     }
     $idAntes = [int]($idTexto | Select-Object -Last 1)
     Escrever-Log "[INFO] Ultimo ID QA anterior: $idAntes"
 
     $etapas = @(
-        @{Nome = '01 Extracao';          Args = @('compose','exec','-T','etl','python','-u','01_extracao.py')},
-        @{Nome = '02 Transformacao';      Args = @('compose','exec','-T','etl','python','-u','02_transformacao.py')},
-        @{Nome = '03 Carga DW';           Args = @('compose','exec','-T','etl','python','-u','03_carga_dw.py')},
-        @{Nome = '04 ABT correta';        Args = @('compose','exec','-T','etl','python','-u','04_abt.py','--correta')},
-        @{Nome = '04 ABT vazamento';      Args = @('compose','exec','-T','etl','python','-u','04_abt.py','--vazamento')},
-        @{Nome = '05 Exportar Orange';   Args = @('compose','exec','-T','etl','python','-u','05_exportar_orange.py')}
+        @{Nome = '01 Extracao';         Args = @('compose','exec','-T','etl','python','-u','01_extracao.py')},
+        @{Nome = '02 Transformacao';     Args = @('compose','exec','-T','etl','python','-u','02_transformacao.py')},
+        @{Nome = '03 Carga DW';          Args = @('compose','exec','-T','etl','python','-u','03_carga_dw.py')},
+        @{Nome = '04 ABT correta';       Args = @('compose','exec','-T','etl','python','-u','04_abt.py','--correta')},
+        @{Nome = '04 ABT vazamento';     Args = @('compose','exec','-T','etl','python','-u','04_abt.py','--vazamento')},
+        @{Nome = '05 Exportar Orange';  Args = @('compose','exec','-T','etl','python','-u','05_exportar_orange.py')}
     )
-
-    foreach ($e in $etapas) {
-        Escrever-Log "`n>>> EXECUTANDO: $($e.Nome)"
+    foreach ($etapa in $etapas) {
+        Escrever-Log "`n>>> EXECUTANDO: $($etapa.Nome)"
         $relogio = [Diagnostics.Stopwatch]::StartNew()
-        Docker-Exec $e.Args
+        Docker-Exec $etapa.Args
         $relogio.Stop()
-        Escrever-Log ("[TEMPO] {0}: {1:N1}s" -f $e.Nome, $relogio.Elapsed.TotalSeconds)
+        Escrever-Log ("[TEMPO] {0}: {1:N1}s" -f $etapa.Nome, $relogio.Elapsed.TotalSeconds)
     }
 
     Escrever-Log "`n>>> AUDITORIA POS-CARGA (somente leitura)"
     Docker-Exec @('compose','exec','-T','etl','python','-u','auditar_pipeline.py','--desde-id',"$idAntes")
 
-    # A referencia fica FORA de 'saida', preservada se a pasta de exportacao for regenerada.
     $atualPath = Join-Path $PSScriptRoot 'saida/auditoria_pipeline.json'
-    if (-not (Test-Path $atualPath)) { throw 'Auditoria nao gerou saida/auditoria_pipeline.json.' }
+    if (-not (Test-Path -LiteralPath $atualPath)) { throw 'Auditoria nao gerou saida/auditoria_pipeline.json.' }
     $atual = Get-Content $atualPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $referenciaPath = Join-Path $pasta 'referencia_pipeline.json'
-    if (-not (Test-Path $referenciaPath)) {
-        Copy-Item $atualPath $referenciaPath
+    $referenciaPath = Join-Path $pastaValidacao 'referencia_pipeline.json'
+    if (-not (Test-Path -LiteralPath $referenciaPath)) {
+        Copy-Item -LiteralPath $atualPath -Destination $referenciaPath
         Escrever-Log '[REFERENCIA] Primeira execucao auditada. Referencia registrada.'
-        Escrever-Log '[IMPORTANTE] Uma segunda execucao permitira verificar a identidade dos CSVs.'
     } else {
         $antiga = Get-Content $referenciaPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($arquivo in @('abt_recompra_correta.csv','abt_recompra_vazamento.csv')) {
+        foreach ($arquivo in @('abt_recompra_correta.csv', 'abt_recompra_vazamento.csv')) {
             $antes = $antiga.csv.$arquivo.sha256_ordenado_cliente_sk
             $depois = $atual.csv.$arquivo.sha256_ordenado_cliente_sk
             if ($antes -ne $depois) { throw "HASH DIFERENTE: $arquivo. Investigue antes de entregar." }
             Escrever-Log "[OK] CSV IDENTICO A REFERENCIA: $arquivo"
         }
-        # As contagens e as asserções também são auditadas no Python.
     }
 
     $cronometroTotal.Stop()
