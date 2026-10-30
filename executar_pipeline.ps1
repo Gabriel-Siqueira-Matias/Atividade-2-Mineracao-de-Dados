@@ -23,9 +23,10 @@ foreach ($arquivo in @('docker-compose.yml', 'etl/01_extracao.py', 'etl/02_trans
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker nao encontrado no PATH.' }
 
 $pasta = Join-Path $PSScriptRoot 'validacao_pipeline'
-New-Item -ItemType Directory -Force -Path $pasta | Out-Null
+$pasta2 = Join-Path $PSScriptRoot 'saida'
+New-Item -ItemType Directory -Force -Path $pasta2 | Out-Null
 $instante = Get-Date -Format 'yyyyMMdd-HHmmss'
-$log = Join-Path $pasta "execucao-$instante.log"
+$log = Join-Path $pasta2 "execucao-$instante.log"
 $cronometroTotal = [Diagnostics.Stopwatch]::StartNew()
 
 # Logger compativel com PowerShell 5.1 que salva UTF-8 (sem BOM),
