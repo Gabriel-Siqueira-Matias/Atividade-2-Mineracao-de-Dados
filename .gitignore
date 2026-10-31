@@ -1,4 +1,5 @@
 dados/
 saida/
+execucoes_pipeline/
 __pycache__/
 *.pyc
