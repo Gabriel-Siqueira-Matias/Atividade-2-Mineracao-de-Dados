@@ -1,4 +1,0 @@
-[ATENCAO] RECONSTRUCAO DO ZERO AUTORIZADA: volumes Docker, ./dados e ./saida serao excluidos.
-[INFO] Mantenha backup externo do DW, do dump SQL e dos CSVs, caso necessite preserva-los.
-[FALHA]  Container lab_etl Stopping 
-[LOG] H:\Mineração\lab-etl-varejo\lab-etl-varejo\execucoes_pipeline\execucao-20261030-214922.log
