@@ -22,6 +22,7 @@ services:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
       interval: 5s
       timeout: 5s
+      start_period: 240s
       retries: 30
 
   # ---------------------------------------------------------------- origem 2
