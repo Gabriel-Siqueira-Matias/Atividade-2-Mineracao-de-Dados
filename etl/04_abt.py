@@ -25,11 +25,30 @@ e descobrir que a diferença entre os dois cabe em uma linha de código.
 """
 
 import argparse
+from time import perf_counter
+
 import pandas as pd
 from sqlalchemy import text
+
 from config import DATA_CORTE, DATA_FIM_ALVO, eng_dw
 from qualidade.assercoes import Suite
-from time import perf_counter
+
+
+def secao(titulo):
+    """Cabeçalho visual para separar blocos da ABT."""
+    print("\n" + "=" * 72)
+    print(titulo)
+    print("=" * 72)
+
+
+def info(mensagem):
+    """Mensagem descritiva padronizada."""
+    print(f"[INFO] {mensagem}")
+
+
+def ok(mensagem):
+    """Mensagem de sucesso padronizada."""
+    print(f"[OK] {mensagem}")
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +293,7 @@ def grava(df, dw, sufixo):
     tabela = "recompra_90d" if sufixo == "correta" else "recompra_90d_vazamento"
     df.to_sql(tabela, dw, schema="abt", if_exists="replace",
               index=False, method="multi", chunksize=5_000)
-    print(f"abt.{tabela}: {len(df)} linhas, {df.shape[1]} colunas")
+    ok(f"abt.{tabela}: {len(df)} linhas, {df.shape[1]} colunas")
 
 
 if __name__ == "__main__":
@@ -282,15 +301,15 @@ if __name__ == "__main__":
     ap.add_argument("--correta", action="store_true")
     ap.add_argument("--vazamento", action="store_true")
     args = ap.parse_args()
-    if not (args.correta or args.vazamento):
-        ap.error("escolha --correta ou --vazamento")
+    if args.correta == args.vazamento:
+        ap.error("escolha somente um: --correta ou --vazamento")
 
     inicio = perf_counter()
+    secao("ETAPA 4 — ABT E EXPERIMENTO DE VAZAMENTO")
+    info("Gerando a versão correta ou a versão com vazamento conforme a flag informada.")
     dw = eng_dw()
     alvo = pd.read_sql(text(SQL_ALVO), dw)
-    print(f"\nIniciando Etapa 4 - Abt ({'correta' if args.correta else 'vazamento'})")
-    print(f"alvo: {len(alvo)} clientes | taxa de recompra = "
-          f"{alvo['alvo_recompra_90d'].mean():.3f}")
+    info(f"alvo: {len(alvo)} clientes | taxa de recompra = {alvo['alvo_recompra_90d'].mean():.3f}")
 
     qa = Suite(etapa="04_abt_" + ("correta" if args.correta else "vazamento"))
     qa.entre("taxa do alvo", float(alvo["alvo_recompra_90d"].mean()), 0.02, 0.60,
@@ -315,4 +334,5 @@ if __name__ == "__main__":
 
     grava(abt, dw, "correta" if args.correta else "vazamento")
     qa.registrar(dw)
-    print(f"[tempo] Etapa 4 concluída em {perf_counter() - inicio:.1f}s\n")
+    ok("Etapa 4 concluída.")
+    print(f"[tempo] total etapa 4      | {perf_counter() - inicio:.1f}s")

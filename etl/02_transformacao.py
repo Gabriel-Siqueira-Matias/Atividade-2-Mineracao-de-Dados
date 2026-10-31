@@ -17,11 +17,28 @@ Uma decisão sem (c) e (d) não conta como decisão registrada.
 
 import re
 import unicodedata
+from time import perf_counter
 import pandas as pd
 from config import eng_dw
 from qualidade.assercoes import Suite
 from sqlalchemy import text
-from time import perf_counter
+
+
+def secao(titulo):
+    """Cabeçalho visual para separar etapas da transformação."""
+    print("\n" + "=" * 72)
+    print(titulo)
+    print("=" * 72)
+
+
+def info(mensagem):
+    """Mensagem descritiva padronizada."""
+    print(f"[INFO] {mensagem}")
+
+
+def ok(mensagem):
+    """Mensagem de sucesso padronizada."""
+    print(f"[OK] {mensagem}")
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +256,7 @@ def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
     pendentes = pedidos["cliente_sk"].isna()
     n_pendentes = int(pendentes.sum())
     if n_pendentes == 0:
-        print(f"[OK] {sistema}: todos os pedidos vinculados pelo ID original")
+        ok(f"{sistema}: todos os pedidos vinculados pelo ID original")
         return pedidos
 
     # Verificar ids nulos ou duplicados
@@ -263,7 +280,7 @@ def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
     pedidos.loc[pendentes, "cliente_sk"] = cpfs_pendentes.map(sk_por_cpf)
 
     recuperados = n_pendentes - int(pedidos["cliente_sk"].isna().sum())
-    print(f"[OK] {sistema}: {recuperados}/{n_pendentes} pedidos recuperados por CPF")
+    print(f"\n[OK] {sistema}: {recuperados}/{n_pendentes} pedidos recuperados por CPF")
     restantes = int(pedidos["cliente_sk"].isna().sum())
     if restantes:
         raise ValueError(
@@ -336,7 +353,7 @@ def conforma_valores(qa):
         FROM stg.legado_itens_pedido
         GROUP BY "ID_PEDIDO"
     """, eng)
-    print(f"[tempo] Agregação itens LEGADO: {perf_counter()-inicio_itens:.1f}s ({len(agg_leg)} pedidos)")
+    print(f"[tempo] agregação LEGADO | {len(agg_leg):>8} pedidos | {perf_counter()-inicio_itens:.1f}s")
     
     ped_leg = ped_leg.merge(agg_leg, on='id_pedido', how='left')
     ped_leg['valor_frete'] = ped_leg['valor_frete'].abs()
@@ -361,7 +378,7 @@ def conforma_valores(qa):
         FROM stg.ecommerce_order_item
         GROUP BY order_id
     """, eng)
-    print(f"[tempo] Agregação itens ECOM: {perf_counter()-inicio_itens:.1f}s ({len(agg_eco)} pedidos)\n")
+    print(f"[tempo] agregação ECOM   | {len(agg_eco):>8} pedidos | {perf_counter()-inicio_itens:.1f}s")
     
     ped_eco = ped_eco.merge(agg_eco, on='order_id', how='left')
     ped_eco['valor_frete'] = ped_eco['freight_amount'].abs()
@@ -420,7 +437,7 @@ def conforma_valores(qa):
     inicio_gravacao = perf_counter()
     fato_final.to_sql('fato_pedido', eng, schema='dw', if_exists='append',
                       index=False, chunksize=10_000)
-    print(f"\n[tempo] Escrita fato_pedido: {perf_counter()-inicio_gravacao:.1f}s ({len(fato_final)} pedidos)")
+    print(f"[tempo] escrita fato_pedido | {len(fato_final):>8} pedidos | {perf_counter()-inicio_gravacao:.1f}s")
 
 
 # ===========================================================================
@@ -543,9 +560,10 @@ def liga_sac_e_avaliacoes(qa):
 
 
 if __name__ == "__main__":
+    secao("ETAPA 2 — TRANSFORMAÇÃO E CONFORMAÇÃO")
+    info("Aplicando as decisões registradas no RDT e preparando as estruturas dimensionais/fato.")
     qa = Suite(etapa="02_transformacao")
     inicio_total = perf_counter()
-    print("\nIniciando Etapa 2 - Transformação")
     etapas = (
         ("Unificação de clientes", unifica_clientes),
         ("Conformação de status", conforma_status),
@@ -557,7 +575,7 @@ if __name__ == "__main__":
     for nome, funcao in etapas:
         inicio_etapa = perf_counter()
         funcao(qa)
-        print(f"[tempo] {nome}: {perf_counter()-inicio_etapa:.1f}s")
+        print(f"[tempo] {nome:<22} | {perf_counter()-inicio_etapa:.1f}s")
 
     # Asserções
     inicio_qa = perf_counter()
@@ -649,7 +667,7 @@ if __name__ == "__main__":
 
     qa.registrar(eng_dw())
     if qa.imprimir():
-        print("Há asserções em falha. Isso não impede seguir, mas precisa "
-              "aparecer no RDT com explicação.")
-    print(f"[tempo] Asserções e registro: {perf_counter()-inicio_qa:.1f}s")
-    print(f"[tempo] ETAPA 2 COMPLETA: {perf_counter()-inicio_total:.1f}s\n")
+        print("[AVISO] Há asserções em falha. Isso não impede seguir, mas precisa aparecer no RDT com explicação.")
+    print(f"[tempo] asserções/registro   | {perf_counter()-inicio_qa:.1f}s")
+    ok("Etapa 2 concluída.")
+    print(f"[tempo] total etapa 2       | {perf_counter()-inicio_total:.1f}s")

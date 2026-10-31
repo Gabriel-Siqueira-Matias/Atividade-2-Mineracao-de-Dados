@@ -4,7 +4,7 @@
 
 **Disciplina:** Mineração de Dados — IFMT
 
-**Consolidação:** XX/10/2026
+**Consolidação:** 30/10/2026
 
 **1\. Pergunta analítica e procedimento**  
 A pergunta é se um cliente com compras registradas até 30/06/2025 voltará a comprar entre 01/07/2025 e 28/09/2025. Construíram-se duas tabelas-base de análise (ABTs) com 108.064 clientes e 15 atributos preditivos. A versão correta limita os atributos ao corte; a versão de comparação introduz, propositalmente, compras futuras em recência e frequência e usa z-score global de valor\_monetario antes do particionamento.

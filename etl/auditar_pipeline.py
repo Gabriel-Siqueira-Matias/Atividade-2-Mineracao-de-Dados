@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Auditoriar posterior aos seis comandos do professor.
+"""Auditoria SOMENTE LEITURA posterior aos seis comandos do professor.
 
 Uso (executado automaticamente pelo .ps1):
     python -u auditar_pipeline.py --desde-id 123
 
-Cria /saida/auditoria_pipeline.json.
+Cria /saida/auditoria_pipeline.json para comparação com uma execução futura.
 Não modifica as tabelas do ETL nem substitui as asserções oficiais.
 """
 
@@ -15,8 +15,26 @@ import hashlib
 import json
 from collections import Counter
 from pathlib import Path
+
 from sqlalchemy import text
 from config import DIR_SAIDA, eng_dw
+
+
+def secao(titulo):
+    """Cabeçalho visual da auditoria final do pipeline."""
+    print("\n" + "=" * 72)
+    print(titulo)
+    print("=" * 72)
+
+
+def info(mensagem):
+    """Mensagem descritiva padronizada."""
+    print(f"[INFO] {mensagem}")
+
+
+def ok(mensagem):
+    """Mensagem de sucesso padronizada."""
+    print(f"[OK] {mensagem}")
 
 CONTAGENS = {
     "stg.legado_clientes": 47250,
@@ -43,7 +61,7 @@ CONTAGENS = {
 }
 
 ETAPAS_QA = {
-    "01_extracao": 11,
+    "01_extracao": 11,  # 4 ERP + 5 ECOM + SAC + avaliações
     "02_transformacao": 4,
     "03_carga_dw": 4,
     "04_abt_correta": 5,
@@ -56,6 +74,9 @@ CSV_ARQUIVOS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Validação dos CSVs exportados para o Orange
+# ---------------------------------------------------------------------------
 def csv_referencia(path, esperado, anterior=None):
     """Assinatura independente da ordem das linhas, ignorando nenhuma coluna."""
     with path.open("r", newline="", encoding="utf-8-sig") as arq:
@@ -117,7 +138,10 @@ def csv_referencia(path, esperado, anterior=None):
 
 
 def auditar(desde_id):
+    """Executa a auditoria final sem alterar nenhum dado do projeto."""
     resumo = {"versao": 1, "esperados_escala": "ESCALA=1.0", "contagens": {}, "indicadores": {}, "qa": {}, "csv": {}}
+    secao("AUDITORIA FINAL DO PIPELINE")
+    info("Conferindo contagens, indicadores, QA registrado e assinaturas dos CSVs.")
     eng = eng_dw()
     with eng.connect() as cx:
         for tabela, esperado in CONTAGENS.items():
@@ -125,7 +149,7 @@ def auditar(desde_id):
             resumo["contagens"][tabela] = obtido
             if obtido != esperado:
                 raise ValueError(f"{tabela}: {obtido} registros, esperado {esperado}")
-            print(f"[OK] {tabela}: {obtido:,} registros")
+            ok(f"{tabela}: {obtido:,} registros")
 
         if cx.execute(text("SELECT COUNT(*) FROM dw.fato_pedido WHERE cliente_sk IS NULL")).scalar_one():
             raise ValueError("Existem pedidos sem cliente_sk")
@@ -167,20 +191,19 @@ def auditar(desde_id):
             if quantidade < minimo:
                 raise ValueError(f"Faltam asserções desta execução em {etapa}: {quantidade}, esperado >= {minimo}")
             resumo["qa"][etapa] = quantidade
-            print(f"[OK] QA {etapa}: {quantidade} asserções aprovadas")
+            ok(f"QA {etapa}: {quantidade} asserções aprovadas")
 
     saida = Path(DIR_SAIDA)
     anterior = None
     for arquivo, origem in CSV_ARQUIVOS.items():
-        info, alvos = csv_referencia(saida / arquivo, CONTAGENS[origem], anterior)
+        info_csv, alvos = csv_referencia(saida / arquivo, CONTAGENS[origem], anterior)
         anterior = alvos
-        resumo["csv"][arquivo] = info
-        print(f"[OK] CSV {arquivo}: {info['linhas']:,} linhas, "
-              f"{info['colunas']} colunas, SHA256={info['sha256_ordenado_cliente_sk'][:16]}...")
+        resumo["csv"][arquivo] = info_csv
+        ok(f"CSV {arquivo}: {info_csv['linhas']:,} linhas, {info_csv['colunas']} colunas, SHA256={info_csv['sha256_ordenado_cliente_sk'][:16]}...")
 
     destino = saida / 'auditoria_pipeline.json'
     destino.write_text(json.dumps(resumo, indent=2, ensure_ascii=False, sort_keys=True) + '\n', encoding='utf-8')
-    print(f"[OK] Auditoria e assinaturas registradas em: {destino}")
+    ok(f"Auditoria e assinaturas registradas em: {destino}")
     return resumo
 
 

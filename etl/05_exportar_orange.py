@@ -22,6 +22,23 @@ from sqlalchemy import text
 
 from config import DIR_SAIDA, eng_dw
 
+
+def secao(titulo):
+    """Cabeçalho visual para a exportação do Orange."""
+    print("\n" + "=" * 72)
+    print(titulo)
+    print("=" * 72)
+
+
+def info(mensagem):
+    """Mensagem descritiva padronizada."""
+    print(f"[INFO] {mensagem}")
+
+
+def ok(mensagem):
+    """Mensagem de sucesso padronizada."""
+    print(f"[OK] {mensagem}")
+
 ALVO = "alvo_recompra_90d"
 IGNORAR = {"cliente_sk", "data_corte"}
 
@@ -38,7 +55,7 @@ def exporta(tabela, arquivo, dw):
     try:
         df = pd.read_sql(text(f"SELECT * FROM abt.{tabela}"), dw)
     except Exception as e:                                   # noqa: BLE001
-        print(f"  [pular] abt.{tabela} indisponível: {type(e).__name__}")
+        print(f"[AVISO] abt.{tabela} indisponível: {type(e).__name__}")
         return
 
     colunas = list(df.columns)
@@ -61,17 +78,18 @@ def exporta(tabela, arquivo, dw):
         f.write(",".join(papeis) + "\n")
     df.to_csv(destino, mode="a", header=False, index=False, encoding="utf-8")
 
-    print(f"  {destino}  ({len(df)} linhas, {len(colunas)} colunas)")
-    print(f"     alvo: {df[ALVO].mean():.3f} de positivos")
+    ok(f"{destino} ({len(df)} linhas, {len(colunas)} colunas)")
+    info(f"taxa do alvo: {df[ALVO].mean():.3f} de positivos")
 
 
 if __name__ == "__main__":
     os.makedirs(DIR_SAIDA, exist_ok=True)
+    secao("ETAPA 5 — EXPORTAÇÃO PARA O ORANGE")
+    info("Gerando os CSVs com as três linhas de cabeçalho exigidas pelo Orange.")
     dw = eng_dw()
-    print("\nIniciando Etapa 5 - Exportar orange")
-    print("exportando para o Orange:")
     exporta("recompra_90d", "abt_recompra_correta.csv", dw)
     exporta("recompra_90d_vazamento", "abt_recompra_vazamento.csv", dw)
+    secao("ORIENTAÇÃO DE USO NO ORANGE")
     print("""
 No Orange, monte o mesmo fluxo para os dois arquivos:
 

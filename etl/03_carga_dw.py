@@ -22,6 +22,26 @@ from config import eng_dw
 from qualidade.assercoes import Suite
 
 
+def secao(titulo):
+    """Cabeçalho visual para separar blocos da carga."""
+    print("\n" + "=" * 72)
+    print(titulo)
+    print("=" * 72)
+
+
+def info(mensagem):
+    """Mensagem descritiva padronizada."""
+    print(f"[INFO] {mensagem}", flush=True)
+
+
+def ok(mensagem):
+    """Mensagem de sucesso padronizada."""
+    print(f"[OK] {mensagem}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# 3.1 Dimensão de tempo
+# ---------------------------------------------------------------------------
 def carrega_dim_tempo(engine, ini=date(2022, 12, 1), fim=date(2026, 3, 31)):
     """Calendário do professor, sem apagar o DW que já contém pedidos."""
     MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
@@ -43,7 +63,7 @@ def carrega_dim_tempo(engine, ini=date(2022, 12, 1), fim=date(2026, 3, 31)):
         ON CONFLICT (data_sk) DO NOTHING
     """)
     inseridos = engine.execute(sql, df.to_dict(orient="records")).rowcount
-    print(f"\ndim_tempo: {len(df)} datas no intervalo, {inseridos} acrescentadas", flush=True)
+    ok(f"dw.dim_tempo: {len(df)} datas avaliadas, {inseridos} novas linhas inseridas")
     return inseridos
 
 
@@ -55,7 +75,7 @@ def carrega_dimensoes(qa):
         n = cx.execute(text(f"SELECT COUNT(*) FROM dw.{t}")).scalar_one()
         if n == 0:
             raise ValueError(f"A dimensão dw.{t} está vazia. Execute a Etapa 2 primeiro.")
-        print(f"[OK] dw.{t}: {n} registros validados.")
+        ok(f"dw.{t}: {n} registros validados.")
     # Sem cliente DESCONHECIDO artificial aqui: os pedidos já estão carregados.
     for coluna in ("id_legado", "id_ecommerce"):
         n = cx.execute(text(f"SELECT COUNT(*) FROM dw.dim_produto WHERE {coluna} IS NOT NULL")).scalar_one()
@@ -75,7 +95,7 @@ def carrega_fato_pedido(qa):
     if total != esperado or total == 0:
         raise ValueError(f"dw.fato_pedido: {total} pedidos; fontes: {esperado}. "
                          "Corrija a carga de pedidos antes de continuar.")
-    print(f"[OK] dw.fato_pedido: {total} pedidos já carregados.")
+    ok(f"dw.fato_pedido: {total} pedidos já carregados.")
 
 
 def carrega_fato_item_pedido(engine, esperados):
@@ -98,7 +118,7 @@ def carrega_fato_item_pedido(engine, esperados):
         JOIN dw.dim_produto pr ON pr.id_legado = i."ID_PRODUTO";
     """))
 
-    print(f"[tempo] Inserção dos itens LEGADO: {perf_counter() - t0:.1f}s", flush=True)
+    print(f"[tempo] itens legado        | {perf_counter() - t0:.1f}s", flush=True)
     # Itens do E-commerce
     t0 = perf_counter()
     cx.execute(text("""
@@ -114,14 +134,14 @@ def carrega_fato_item_pedido(engine, esperados):
         JOIN dw.fato_pedido p ON p.sistema_origem = 'ECOM' AND p.id_origem = 'ECOM-' || i.order_id::text
         JOIN dw.dim_produto pr ON pr.id_ecommerce = i.product_id;
     """))
-    print(f"[tempo] Inserção dos itens ECOM: {perf_counter() - t0:.1f}s\n", flush=True)
+    print(f"[tempo] itens ecom          | {perf_counter() - t0:.1f}s", flush=True)
     # Reutiliza a contagem de órfãos feita em carrega_fato_item(qa):
     # evita refazer duas junções grandes (1,39 milhão de registros) só para contar.
     inseridos = cx.execute(text("SELECT COUNT(*) FROM dw.fato_item_pedido")).scalar_one()
     if inseridos != esperados:
         raise ValueError(f"fato_item_pedido: {inseridos} inseridos, "
                          f"{esperados} elegíveis. Confira os IDs da dim_produto.")
-    print(f"[OK] dw.fato_item_pedido: {inseridos} itens elegíveis inseridos.", flush=True)
+    ok(f"dw.fato_item_pedido: {inseridos} itens elegíveis inseridos.")
 
 
 def carrega_fato_atendimento(engine):
@@ -171,7 +191,7 @@ def carrega_fato_atendimento(engine):
     carregados = cx.execute(text("SELECT COUNT(*) FROM dw.fato_atendimento")).scalar_one()
     if esperados != carregados:
         raise ValueError(f"SAC: {carregados} protocolos inseridos, esperados {esperados}")
-    print(f"[OK] dw.fato_atendimento: {carregados} protocolos únicos.")
+    ok(f"dw.fato_atendimento: {carregados} protocolos únicos.")
 
 
 def carrega_fato_avaliacao(engine):
@@ -212,7 +232,7 @@ def carrega_fato_avaliacao(engine):
     carregados = cx.execute(text("SELECT COUNT(*) FROM dw.fato_avaliacao")).scalar_one()
     if esperados != carregados:
         raise ValueError(f"Avaliações: {carregados} inseridas, esperadas {esperados}")
-    print(f"[OK] dw.fato_avaliacao: {carregados} avaliações.")
+    ok(f"dw.fato_avaliacao: {carregados} avaliações.")
 
 
 def carrega_fato_item(qa):
@@ -232,7 +252,7 @@ def carrega_fato_item(qa):
         """), {"sistema": sistema, "prefixo": prefixo}).scalar_one()
         total = cx.execute(text(f"SELECT COUNT(*) FROM stg.{origem}")).scalar_one()
         esperados += total - orfaos
-        print(f"Itens órfãos ({sistema}), mantidos no staging: {orfaos}", flush=True)
+        info(f"Itens órfãos ({sistema}) mantidos no staging: {orfaos}")
     carrega_fato_item_pedido(cx, esperados)
 
 
@@ -241,10 +261,10 @@ def carrega_fatos_auxiliares(qa):
     cx = qa.conexao
     t0 = perf_counter()
     carrega_fato_atendimento(cx)
-    print(f"[tempo] Atendimento: {perf_counter() - t0:.1f}s\n", flush=True)
+    print(f"[tempo] fato_atendimento   | {perf_counter() - t0:.1f}s", flush=True)
     t0 = perf_counter()
     carrega_fato_avaliacao(cx)
-    print(f"[tempo] Avaliações: {perf_counter() - t0:.1f}s\n", flush=True)
+    print(f"[tempo] fato_avaliacao     | {perf_counter() - t0:.1f}s", flush=True)
 
 
 
@@ -264,7 +284,7 @@ def conferir_carga_gravada(engine):
                 (SELECT COUNT(*) FROM stg.avaliacoes_marketplace) AS avaliacoes_origem
         """)).mappings().one()
         for k, v in dados.items():
-            print(f"  {k}: {v}")
+            print(f"  - {k:<18}: {v}")
         qa = cx.execute(text("""
             SELECT executado_em,
                    COUNT(*) AS testes,
@@ -274,13 +294,13 @@ def conferir_carga_gravada(engine):
             WHERE etapa = '03_carga_dw'
             GROUP BY executado_em ORDER BY executado_em DESC LIMIT 1
         """)).mappings().first()
-        print("Última execução QA:", dict(qa) if qa else "não encontrada")
+        info(f"Última execução QA: {dict(qa) if qa else "não encontrada"}")
         aux_sem_pedido = cx.execute(text("""
             SELECT
                 (SELECT COUNT(*) FROM dw.fato_atendimento WHERE pedido_sk IS NULL) AS sac,
                 (SELECT COUNT(*) FROM dw.fato_avaliacao WHERE pedido_sk IS NULL) AS avaliacoes
         """)).mappings().one()
-        print("Auxiliares sem pedido:", dict(aux_sem_pedido))
+        info(f"Auxiliares sem pedido: {dict(aux_sem_pedido)}")
         # Para ESCALA=1, o histórico foi 1.371.876 itens / 20.577 órfãos.
         # A carga já comparou os totais elegíveis antes do COMMIT;
         # esta conferência final verifica persistência, vínculos e QA.
@@ -299,10 +319,11 @@ def conferir_carga_gravada(engine):
 
 
 if __name__ == "__main__":
+    secao("ETAPA 3 — CARGA NO ESQUEMA ESTRELA")
+    info("Recarregando apenas as fatos auxiliares e conferindo a consistência final do DW.")
     dw = eng_dw()
     qa = Suite(etapa="03_carga_dw")
     inicio = perf_counter()
-    print("\nIniciando Etapa 3 - Carga dw")
     # Uma transação para a carga integral: qualquer erro reverte tudo.
     with dw.begin() as cx:
         qa.conexao = cx
@@ -316,13 +337,13 @@ if __name__ == "__main__":
             TRUNCATE TABLE dw.fato_item_pedido, dw.fato_atendimento,
                            dw.fato_avaliacao RESTART IDENTITY
         """))
-        print(f"[tempo] Preparação das fatos: {perf_counter() - t0:.1f}s\n", flush=True)
+        print(f"[tempo] preparação fatos   | {perf_counter() - t0:.1f}s", flush=True)
         t0 = perf_counter()
         carrega_fato_item(qa)
-        print(f"[tempo] Itens: {perf_counter() - t0:.1f}s\n", flush=True)
+        print(f"[tempo] carga de itens     | {perf_counter() - t0:.1f}s", flush=True)
         t0 = perf_counter()
         carrega_fatos_auxiliares(qa)
-        print(f"[tempo] SAC e avaliações: {perf_counter() - t0:.1f}s\n", flush=True)
+        print(f"[tempo] fatos auxiliares   | {perf_counter() - t0:.1f}s", flush=True)
 
         t0 = perf_counter()
         # 3.5 — as quatro asserções obrigatórias do professor:
@@ -387,11 +408,12 @@ if __name__ == "__main__":
         qa.imprimir()
         if qa.falhou():
             raise RuntimeError("Asserções falharam; toda a carga foi revertida")
-        print(f"[tempo] Asserções: {perf_counter() - t0:.1f}s", flush=True)
+        print(f"[tempo] asserções          | {perf_counter() - t0:.1f}s", flush=True)
 
     # Registrar QA depois do COMMIT dos dados. Não refaz as transformações.
     qa.registrar(dw)
     t0 = perf_counter()
     conferir_carga_gravada(dw)
-    print(f"[tempo] Conferência da carga gravada: {perf_counter() - t0:.1f}s", flush=True)
-    print(f"[OK] Etapa 3: recarga completa, QA registrado e dados conferidos. Total: {perf_counter() - inicio:.1f}s\n", flush=True)
+    print(f"[tempo] conferência final  | {perf_counter() - t0:.1f}s", flush=True)
+    ok("Etapa 3 concluída: recarga, QA e conferência final realizados.")
+    print(f"[tempo] total etapa 3      | {perf_counter() - inicio:.1f}s", flush=True)

@@ -1,0 +1,215 @@
+[INICIO] Auditoria de reexecucao do pipeline, SEM apagar volumes
+NAME               IMAGE                COMMAND                  SERVICE        CREATED       STATUS                       PORTS
+lab_adminer        adminer:4            "entrypoint.sh docke…"   adminer        2 weeks ago   Up About an hour             0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+lab_etl            lab-etl-varejo-etl   "sleep infinity"         etl            2 weeks ago   Up About an hour             
+lab_mysql_legado   mysql:8.0            "docker-entrypoint.s…"   mysql_legado   2 weeks ago   Up About an hour (healthy)   0.0.0.0:3307->3306/tcp, [::]:3307->3306/tcp
+lab_pg_dw          postgres:16          "docker-entrypoint.s…"   pg_dw          2 weeks ago   Up About an hour (healthy)   0.0.0.0:15433->5432/tcp, [::]:15433->5432/tcp
+lab_pg_ecommerce   postgres:16          "docker-entrypoint.s…"   pg_ecommerce   2 weeks ago   Up About an hour (healthy)   0.0.0.0:15432->5432/tcp, [::]:15432->5432/tcp
+[INFO] Ultimo ID QA anterior: 248
+
+>>> EXECUTANDO: 01 Extracao
+
+Iniciando Etapa 1 - Extração
+[tempo] Extração LEGADO/CLIENTES: 3.1s (47250 linhas)
+[tempo] Extração LEGADO/PRODUTOS: 0.2s (3000 linhas)
+[tempo] Extração LEGADO/PEDIDOS: 9.9s (130000 linhas)
+[tempo] Extração LEGADO/ITENS_PEDIDO: 21.6s (397086 linhas)
+[tempo] Extração ECOM/customer: 4.7s (85000 linhas)
+[tempo] Extração ECOM/product: 0.6s (12000 linhas)
+[tempo] Extração ECOM/orders: 18.4s (280000 linhas)
+[tempo] Extração ECOM/order_item: 43.7s (995367 linhas)
+[tempo] Extração ECOM/category: 0.1s (21 linhas)
+[tempo] Extração SAC: 5.2s (96140 linhas)
+[tempo] Extração avaliações: 9.1s (160000 linhas)
+
+=== asserções · 01_extracao ==============================
+  [OK  ] linhas legado.CLIENTES      obtido=47250.0  esperado = 47250
+  [OK  ] linhas legado.PRODUTOS      obtido=3000.0  esperado = 3000
+  [OK  ] linhas legado.PEDIDOS       obtido=130000.0  esperado = 130000
+  [OK  ] linhas legado.ITENS_PEDIDO  obtido=397086.0  esperado = 397086
+  [OK  ] linhas shop.customer        obtido=85000.0  esperado = 85000
+  [OK  ] linhas shop.product         obtido=12000.0  esperado = 12000
+  [OK  ] linhas shop.orders          obtido=280000.0  esperado = 280000
+  [OK  ] linhas shop.order_item      obtido=995367.0  esperado = 995367
+  [OK  ] linhas shop.category        obtido=21.0  esperado = 21
+  [OK  ] protocolo do SAC            obtido=0  esperado = 0 nulos
+  [OK  ] review_id                   obtido=0  esperado = 0 duplicados
+  11 asserções, 0 falha(s)
+
+[tempo] QA e registro: 0.0s
+[tempo] ETAPA 1 COMPLETA: 116.7s
+
+[TEMPO] 01 Extracao: 117,8s
+
+>>> EXECUTANDO: 02 Transformacao
+
+Iniciando Etapa 2 - Transformação
+[tempo] Unificação de clientes: 9.1s
+[tempo] Conformação de status: 0.9s
+[tempo] Agregação itens LEGADO: 1.5s (134427 pedidos)
+[tempo] Agregação itens ECOM: 3.0s (287702 pedidos)
+
+[OK] LEGADO: 3930/3930 pedidos recuperados por CPF
+[OK] ECOM: 360/360 pedidos recuperados por CPF
+
+[tempo] Escrita fato_pedido: 29.5s (410000 pedidos)
+[tempo] Valores e fato_pedido: 41.4s
+[tempo] Categorias e produtos: 1.0s
+[tempo] Datas e ausências: 8.4s
+[tempo] Vínculos SAC/avaliações: 3.1s
+
+=== asserções · 02_transformacao ==============================
+  [OK  ] CPF valido sem duplicidade               obtido=0  esperado = 0 duplicados
+  [OK  ] origem_unificacao no dominio             obtido=0  esperado todos em ['AMBOS', 'ECOM', 'LEGADO']
+  [OK  ] pedidos x clientes sem multiplicacao     obtido=410000  esperado <= 410000
+  [OK  ] pedidos divergentes de itens (> R$0,01)  obtido=0.0  esperado = 0
+  4 asserções, 0 falha(s)
+
+[tempo] Asserções e registro: 4.1s
+[tempo] ETAPA 2 COMPLETA: 68.2s
+
+[TEMPO] 02 Transformacao: 69,1s
+
+>>> EXECUTANDO: 03 Carga DW
+
+Iniciando Etapa 3 - Carga dw
+
+dim_tempo: 1217 datas no intervalo, 99 acrescentadas
+[OK] dw.dim_cliente: 115674 registros validados.
+[OK] dw.dim_produto: 15000 registros validados.
+[OK] dw.dim_canal: 3 registros validados.
+[OK] dw.dim_status: 9 registros validados.
+[OK] dw.fato_pedido: 410000 pedidos já carregados.
+[tempo] Preparação das fatos: 0.8s
+
+Itens órfãos (LEGADO), mantidos no staging: 5868
+Itens órfãos (ECOM), mantidos no staging: 14709
+[tempo] Inserção dos itens LEGADO: 7.1s
+[tempo] Inserção dos itens ECOM: 20.9s
+
+[OK] dw.fato_item_pedido: 1371876 itens elegíveis inseridos.
+[tempo] Itens: 28.4s
+
+[OK] dw.fato_atendimento: 95000 protocolos únicos.
+[tempo] Atendimento: 5.8s
+
+[OK] dw.fato_avaliacao: 160000 avaliações.
+[tempo] Avaliações: 4.5s
+
+[tempo] SAC e avaliações: 10.3s
+
+
+=== asserções · 03_carga_dw ==============================
+  [OK  ] sem FK órfã em fato_pedido                       obtido=0.0  esperado = 0
+  [OK  ] contagem total de fato_pedido                    obtido=410000.0  esperado = 410000
+  [OK  ] reconciliacao financeira (LEGADO e ECOM, ±0,1%)  obtido=0.0  esperado = 0
+  [OK  ] nenhum pedido com dias_entrega negativo          obtido=0.0  esperado = 0
+  4 asserções, 0 falha(s)
+
+[tempo] Asserções: 3.0s
+  pedidos: 410000
+  itens: 1371876
+  sac: 95000
+  avaliacoes: 160000
+  pedidos_origem: 410000
+  sac_origem: 95000
+  avaliacoes_origem: 160000
+Última execução QA: {'executado_em': datetime.datetime(2026, 10, 30, 2, 49, 16, 345187, tzinfo=datetime.timezone.utc), 'testes': 4, 'aprovadas': 4, 'falhas': 0}
+Auxiliares sem pedido: {'sac': 0, 'avaliacoes': 0}
+[OK] Última carga validada.
+[tempo] Conferência da carga gravada: 0.3s
+[OK] Etapa 3: recarga completa, QA registrado e dados conferidos. Total: 43.2s
+
+[TEMPO] 03 Carga DW: 44,1s
+
+>>> EXECUTANDO: 04 ABT correta
+
+Iniciando Etapa 4 - Abt (correta)
+alvo: 108064 clientes | taxa de recompra = 0.222
+
+=== asserções · 04_abt_correta ==============================
+  [OK  ] taxa do alvo                                obtido=0.22248852531832988  esperado [0.02, 0.6]
+  [OK  ] cliente_sk no alvo                          obtido=0  esperado = 0 duplicados
+  [OK  ] junção alvo x atributos                     obtido=108064  esperado <= 108064
+  [OK  ] atributos históricos para toda a população  obtido=0  esperado = 0 nulos
+  [OK  ] amostra temporal sem divergências           obtido=0.0  esperado = 0
+  5 asserções, 0 falha(s)
+
+abt.recompra_90d: 108064 linhas, 18 colunas
+[tempo] Etapa 4 concluída em 41.5s
+
+[TEMPO] 04 ABT correta: 42,4s
+
+>>> EXECUTANDO: 04 ABT vazamento
+
+Iniciando Etapa 4 - Abt (vazamento)
+alvo: 108064 clientes | taxa de recompra = 0.222
+
+=== asserções · 04_abt_vazamento ==============================
+  [OK  ] taxa do alvo                                obtido=0.22248852531832988  esperado [0.02, 0.6]
+  [OK  ] cliente_sk no alvo                          obtido=0  esperado = 0 duplicados
+  [OK  ] junção alvo x atributos                     obtido=108064  esperado <= 108064
+  [OK  ] atributos históricos para toda a população  obtido=0  esperado = 0 nulos
+  4 asserções, 0 falha(s)
+
+abt.recompra_90d_vazamento: 108064 linhas, 18 colunas
+[tempo] Etapa 4 concluída em 37.1s
+
+[TEMPO] 04 ABT vazamento: 38,0s
+
+>>> EXECUTANDO: 05 Exportar Orange
+
+Iniciando Etapa 5 - Exportar orange
+exportando para o Orange:
+  /saida/abt_recompra_correta.csv  (108064 linhas, 18 colunas)
+     alvo: 0.222 de positivos
+  /saida/abt_recompra_vazamento.csv  (108064 linhas, 18 colunas)
+     alvo: 0.222 de positivos
+
+No Orange, monte o mesmo fluxo para os dois arquivos:
+
+    File -> Data Sampler (70/30, estratificado) -> Naive Bayes -> Test & Score
+                                               -> Logistic Regression
+                                               -> Tree
+            Test & Score -> Confusion Matrix
+                         -> ROC Analysis
+
+Use o MESMO conjunto de teste e as MESMAS configurações nos dois. A única
+diferença entre os fluxos deve ser o arquivo de entrada.
+
+[TEMPO] 05 Exportar Orange: 5,1s
+
+>>> AUDITORIA POS-CARGA (somente leitura)
+[OK] stg.legado_clientes: 47,250 registros
+[OK] stg.legado_produtos: 3,000 registros
+[OK] stg.legado_pedidos: 130,000 registros
+[OK] stg.legado_itens_pedido: 397,086 registros
+[OK] stg.ecommerce_customer: 85,000 registros
+[OK] stg.ecommerce_product: 12,000 registros
+[OK] stg.ecommerce_orders: 280,000 registros
+[OK] stg.ecommerce_order_item: 995,367 registros
+[OK] stg.ecommerce_category: 21 registros
+[OK] stg.atendimentos_sac: 96,140 registros
+[OK] stg.avaliacoes_marketplace: 160,000 registros
+[OK] dw.dim_cliente: 115,674 registros
+[OK] dw.dim_produto: 15,000 registros
+[OK] dw.dim_status: 9 registros
+[OK] dw.dim_canal: 3 registros
+[OK] dw.fato_pedido: 410,000 registros
+[OK] dw.fato_item_pedido: 1,371,876 registros
+[OK] dw.fato_atendimento: 95,000 registros
+[OK] dw.fato_avaliacao: 160,000 registros
+[OK] abt.recompra_90d: 108,064 registros
+[OK] abt.recompra_90d_vazamento: 108,064 registros
+[OK] QA 01_extracao: 22 asserções aprovadas
+[OK] QA 02_transformacao: 4 asserções aprovadas
+[OK] QA 03_carga_dw: 4 asserções aprovadas
+[OK] QA 04_abt_correta: 5 asserções aprovadas
+[OK] QA 04_abt_vazamento: 4 asserções aprovadas
+[OK] CSV abt_recompra_correta.csv: 108,064 linhas, 18 colunas, SHA256=c36acb81a17e5d42...
+[OK] CSV abt_recompra_vazamento.csv: 108,064 linhas, 18 colunas, SHA256=11e85cdacc3b78c7...
+[OK] Auditoria e assinaturas registradas em: /saida/auditoria_pipeline.json
+[OK] CSV IDENTICO A REFERENCIA: abt_recompra_correta.csv
+[OK] CSV IDENTICO A REFERENCIA: abt_recompra_vazamento.csv
+[SUCESSO] Pipeline reexecutado e auditado em 321,0s
+[LOG] H:\Mineração\lab-etl-varejo\lab-etl-varejo\validacao_pipeline\execucao-20261029-224524.log

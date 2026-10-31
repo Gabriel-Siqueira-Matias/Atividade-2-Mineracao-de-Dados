@@ -16,11 +16,28 @@ Não altera os CSVs originais, o 04_abt.py nem o banco de dados.
 """
 
 from pathlib import Path
+from time import perf_counter
 import numpy as np
 import pandas as pd
-from config import DIR_SAIDA
-from time import perf_counter
 
+from config import DIR_SAIDA
+
+
+def secao(titulo):
+    """Cabeçalho visual do experimento auxiliar."""
+    print("\n" + "=" * 72)
+    print(titulo)
+    print("=" * 72)
+
+
+def info(mensagem):
+    """Mensagem descritiva padronizada."""
+    print(f"[INFO] {mensagem}")
+
+
+def ok(mensagem):
+    """Mensagem de sucesso padronizada."""
+    print(f"[OK] {mensagem}")
 
 ORIGEM = Path(DIR_SAIDA) / 'abt_recompra_correta.csv'
 ALVO = 'alvo_recompra_90d'
@@ -34,12 +51,13 @@ def grava_orange(destino, tabela, cabecalho):
     with open(destino, 'w', encoding='utf-8', newline='') as saida:
         saida.writelines(cabecalho)
     tabela.to_csv(destino, mode='a', header=False, index=False, encoding='utf-8')
-    print(f'[OK] {destino.name}: {len(tabela)} linhas, {len(tabela.columns)} colunas')
+    ok(f'{destino.name}: {len(tabela)} linhas, {len(tabela.columns)} colunas')
 
 
-if __name__ == '__main__':
+def main():
     inicio = perf_counter()
-    print("\nIniciando o experimento normalização")
+    secao("EXPERIMENTO AUXILIAR — NORMALIZAÇÃO")
+    info("Comparando normalização segura (treino) com normalização global (vazamento).")
     if not ORIGEM.is_file():
         raise FileNotFoundError(f'Não encontrei {ORIGEM}; execute antes 05_exportar_orange.py')
 
@@ -91,12 +109,16 @@ if __name__ == '__main__':
             destino = Path(DIR_SAIDA) / f'abt_norm_{nome}_{papel}.csv'
             grava_orange(destino, resultado, cabecalho)
 
-    print('\n=== RESUMO DO EXPERIMENTO ===')
-    print('Atributo alterado nas duas versões:', ATRIBUTO)
-    print('Todas as outras features e o alvo: inalterados')
-    print(f'Treino: {len(treino)} clientes | Teste: {len(teste)} clientes')
-    print('Taxas de recompra:',
-            f'treino {treino[ALVO].mean():.4%} | teste {teste[ALVO].mean():.4%}')
-    print(f'Média / DP apenas do treino: {media_treino:.6f} / {dp_treino:.6f}')
-    print(f'Média / DP da base inteira: {media_global:.6f} / {dp_global:.6f}')
-    print(f'[tempo] Experimento pronto: {perf_counter() - inicio:.1f}s\n')
+    secao('RESUMO DO EXPERIMENTO')
+    info(f'Atributo alterado nas duas versões: {ATRIBUTO}')
+    info('Todas as outras features e o alvo permaneceram inalterados')
+    info(f'Treino: {len(treino)} clientes | Teste: {len(teste)} clientes')
+    info('Taxas de recompra: ' + f'treino {treino[ALVO].mean():.4%} | teste {teste[ALVO].mean():.4%}')
+    info(f'Média / DP apenas do treino: {media_treino:.6f} / {dp_treino:.6f}')
+    info(f'Média / DP da base inteira: {media_global:.6f} / {dp_global:.6f}')
+    ok('Experimento concluído.')
+    print(f'[tempo] total experimento | {perf_counter() - inicio:.1f}s')
+
+
+if __name__ == '__main__':
+    main()

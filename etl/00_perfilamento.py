@@ -31,9 +31,25 @@ pd.set_option("display.width", 160)
 
 
 def secao(titulo):
+    """Imprime um cabeçalho padronizado para cada fonte analisada."""
     print("\n" + "=" * 72)
     print(titulo)
     print("=" * 72)
+
+
+def subsecao(titulo):
+    """Imprime um subtítulo simples para blocos menores de saída."""
+    print(f"\n--- {titulo} ---")
+
+
+def info(mensagem):
+    """Padroniza mensagens descritivas exibidas no terminal."""
+    print(f"[INFO] {mensagem}")
+
+
+def ok(mensagem):
+    """Padroniza mensagens de sucesso exibidas no terminal."""
+    print(f"[OK] {mensagem}")
 
 
 def perfil_coluna(serie):
@@ -70,7 +86,7 @@ def perfila_dataframe(df, nome):
         p["tipo"] = str(df[col].dtype)
         linhas.append(p)
     perfil = pd.DataFrame(linhas).set_index("coluna")
-    print(f"\n--- {nome} ({len(df)} linhas) ---")
+    subsecao(f"{nome} ({len(df)} linhas)")
     print(perfil.to_string())
     return perfil
 
@@ -83,12 +99,15 @@ def salva(nome, blocos):
             f.write(f"## {titulo}\n\n")
             f.write(df.to_markdown())
             f.write("\n\n")
-    print(f"\n>> gravado em {caminho}")
+    ok(f"arquivo gravado em: {caminho}")
 
 
 # ===========================================================================
 # 1. MySQL legado
 # ===========================================================================
+secao("ETAPA 0 — PERFILAMENTO DAS FONTES")
+info("Iniciando leitura exploratória das quatro fontes do projeto.")
+
 secao("FONTE 1 — MySQL · loja_legado")
 eng = eng_mysql()
 blocos = []
@@ -147,16 +166,16 @@ salva("ecommerce", blocos)
 # 3. CSV do SAC
 # ===========================================================================
 secao("FONTE 3 — CSV · atendimentos_sac.csv")
-print("Dica: tente ler com encoding='utf-8' e observe o erro. Depois leia certo.")
+info("Dica: tente ler com encoding='utf-8' e observe o erro. Depois leia com o encoding correto.")
 sac = pd.read_csv(ARQ_SAC, sep=";", encoding="latin-1", dtype=str)
 perfil_sac = perfila_dataframe(sac, "SAC")
-print("\n· origem_sistema:", dict(Counter(sac["origem_sistema"])))
-print("· linhas idênticas repetidas:", int(sac.duplicated().sum()))
+info(f"origem_sistema: {dict(Counter(sac["origem_sistema"]))}")
+info(f"linhas idênticas repetidas: {int(sac.duplicated().sum())}")
 print("· notas fora do domínio 1..5:",
       int((~sac["nota_satisfacao"].fillna("").isin(list("12345") + [""])).sum()))
 print("· campos com quebra de linha interna:",
       int(sac["motivo"].fillna("").str.contains("\n").sum()))
-print("· motivos distintos (texto livre):", sac["motivo"].nunique())
+info(f"motivos distintos (texto livre): {sac["motivo"].nunique()}")
 salva("sac", [("atendimentos_sac.csv", perfil_sac)])
 
 # ===========================================================================
@@ -180,7 +199,7 @@ with open(ARQ_AVALIACOES, encoding="utf-8") as f:
         else:
             sem_fuso += 1
 
-print(f"registros: {total}")
+info(f"registros lidos: {total}")
 print("\n· presença de cada chave de primeiro nível:")
 for k, v in chaves.most_common():
     print(f"    {k:20s} {v:>8} ({100*v/total:5.1f}%)")

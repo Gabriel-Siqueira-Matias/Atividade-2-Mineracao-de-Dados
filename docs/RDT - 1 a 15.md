@@ -6,7 +6,7 @@
 
 **Disciplina:** Mineração de Dados — IFMT
 
-**Data de consolidação:** XX/10/2026
+**Data de consolidação:** 30/10/2026
 
 **Versão do pipeline:** 02\_transformacao.py \+ 03\_carga\_dw.py \+ 04\_abt.py
 

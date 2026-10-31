@@ -24,15 +24,34 @@ from datetime import datetime, timezone
 import pandas as pd
 from sqlalchemy import text
 import json
+from time import perf_counter
 from config import (ARQ_AVALIACOES, ARQ_SAC, eng_dw, eng_mysql, eng_origem)
 from qualidade.assercoes import Suite
-from time import perf_counter
 
+
+def secao(titulo):
+    """Cabeçalho visual para separar blocos da extração."""
+    print("\n" + "=" * 72)
+    print(titulo)
+    print("=" * 72)
+
+
+def info(mensagem):
+    """Mensagem descritiva padronizada."""
+    print(f"[INFO] {mensagem}")
+
+
+def ok(mensagem):
+    """Mensagem de sucesso padronizada."""
+    print(f"[OK] {mensagem}")
 
 AGORA = datetime.now(timezone.utc)
 LOTE = 50_000          # leia em blocos: a base não cabe confortavelmente na RAM
 
 
+# ---------------------------------------------------------------------------
+# Escrita da camada staging
+# ---------------------------------------------------------------------------
 def grava_stg(df, tabela, engine, primeiro_bloco):
     df["_fonte"] = tabela.split("_")[0]
     df["_extraido_em"] = AGORA
@@ -42,6 +61,9 @@ def grava_stg(df, tabela, engine, primeiro_bloco):
               index=False, method=None, chunksize=5_000)
 
 
+# ---------------------------------------------------------------------------
+# Extração das tabelas do legado (MySQL)
+# ---------------------------------------------------------------------------
 def extrai_mysql(qa):
     eng, dw = eng_mysql(), eng_dw()
     tabelas = ["CLIENTES", "PRODUTOS", "PEDIDOS", "ITENS_PEDIDO"]
@@ -57,9 +79,12 @@ def extrai_mysql(qa):
             grava_stg(chunk, nome_destino, dw, primeiro_bloco)
             primeiro_bloco = False
         qa.igual(f"linhas legado.{tabela}", linhas_lidas, esperadas)
-        print(f"[tempo] Extração LEGADO/{tabela}: {perf_counter()-inicio_tabela:.1f}s ({linhas_lidas} linhas)")
+        print(f"[tempo] legado/{tabela.lower():<12} | {linhas_lidas:>8} linhas | {perf_counter()-inicio_tabela:.1f}s")
 
 
+# ---------------------------------------------------------------------------
+# Extração das tabelas do e-commerce (PostgreSQL)
+# ---------------------------------------------------------------------------
 def extrai_postgres(qa):
     eng, dw = eng_origem(), eng_dw()
     tabelas = ["customer", "product", "orders", "order_item", "category"]
@@ -75,9 +100,12 @@ def extrai_postgres(qa):
             grava_stg(chunk, nome_destino, dw, primeiro_bloco)
             primeiro_bloco = False
         qa.igual(f"linhas shop.{tabela}", linhas_lidas, esperadas)
-        print(f"[tempo] Extração ECOM/{tabela}: {perf_counter()-inicio_tabela:.1f}s ({linhas_lidas} linhas)")
+        print(f"[tempo] ecom/{tabela:<14} | {linhas_lidas:>8} linhas | {perf_counter()-inicio_tabela:.1f}s")
 
 
+# ---------------------------------------------------------------------------
+# Extração do arquivo CSV do SAC
+# ---------------------------------------------------------------------------
 def extrai_sac(qa):
     inicio = perf_counter()
     dw = eng_dw()
@@ -85,9 +113,12 @@ def extrai_sac(qa):
     df["_linha_origem"] = df.index + 2
     grava_stg(df, "atendimentos_sac", dw, True)
     qa.sem_nulos("protocolo do SAC", df["protocolo"])
-    print(f"[tempo] Extração SAC: {perf_counter()-inicio:.1f}s ({len(df)} linhas)")
+    print(f"[tempo] sac/csv          | {len(df):>8} linhas | {perf_counter()-inicio:.1f}s")
 
 
+# ---------------------------------------------------------------------------
+# Extração do arquivo NDJSON de avaliações
+# ---------------------------------------------------------------------------
 def extrai_avaliacoes(qa):
     inicio = perf_counter()
     dw = eng_dw()
@@ -129,12 +160,13 @@ def extrai_avaliacoes(qa):
         grava_stg(pd.DataFrame(columns=colunas), "avaliacoes_marketplace", dw, True)
 
     qa.unico("review_id", pd.Series(review_ids, name="review_id", dtype="object"))
-    print(f"[tempo] Extração avaliações: {perf_counter()-inicio:.1f}s ({total} linhas)")
+    print(f"[tempo] avaliacoes/json | {total:>8} linhas | {perf_counter()-inicio:.1f}s")
 
 
 if __name__ == "__main__":
     inicio_total = perf_counter()
-    print("\nIniciando Etapa 1 - Extração")
+    secao("ETAPA 1 — EXTRAÇÃO")
+    info("Carregando as fontes para a camada staging sem alterar o significado dos dados.")
     qa = Suite(etapa="01_extracao")
     extrai_mysql(qa)
     extrai_postgres(qa)
@@ -143,5 +175,6 @@ if __name__ == "__main__":
     inicio_qa = perf_counter()
     qa.registrar(eng_dw())
     qa.imprimir()
-    print(f"[tempo] QA e registro: {perf_counter()-inicio_qa:.1f}s")
-    print(f"[tempo] ETAPA 1 COMPLETA: {perf_counter()-inicio_total:.1f}s\n")
+    print(f"[tempo] qa/registro      | {perf_counter()-inicio_qa:.1f}s")
+    ok("Etapa 1 concluída com sucesso.")
+    print(f"[tempo] total etapa 1    | {perf_counter()-inicio_total:.1f}s")
