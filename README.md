@@ -4,8 +4,6 @@ Projeto prático de **Mineração de Dados — IFMT, 2026/2**.
 
 O projeto integra quatro fontes de dados (ERP MySQL, e-commerce PostgreSQL, SAC CSV e avaliações NDJSON), implementa um Data Warehouse em esquema estrela e produz duas ABTs (uma correta e outra intencionalmente contaminada por vazamento de dados) para estudar a previsão de recompra. Inclui controle de qualidade, auditoria automatizada, testes de reprodutibilidade e fluxos do Orange Data Mining.
 
-> **Validação mais recente — 30/10/2026:** o teste com `-ReconstruirDoZero` removeu os volumes e pastas geradas, recriou o ambiente, iniciou os bancos e o gerador, executou as seis etapas, aprovou **28/28 asserções** e produziu **dois CSVs idênticos à referência SHA-256**, em **677,8 s (11 min 17,8 s)**. Evidência: log local `execucoes_pipeline/execucao-20261030-231111.log`, não incluído no Git.
-
 ## 1. Pré-requisitos
 
 - Docker Desktop iniciado e Docker Compose v2 disponível.
@@ -26,7 +24,7 @@ docker compose config --quiet
 
 ```text
 lab-etl-varejo/
-├── .env.example                     # Escala dos dados gerados
+├── .env.example                    # Escala dos dados gerados
 ├── docker-compose.yml              # Serviços e healthchecks
 ├── executar_pipeline.ps1           # Reexecução, reconstrução e auditoria
 ├── gerador/                        # Gerador determinístico e carga inicial
@@ -52,7 +50,7 @@ lab-etl-varejo/
 └── saida/                          # CSVs e auditoria, ignorados pelo Git
 ```
 
-**Importante:** `dados/`, `saida/` e `execucoes_pipeline/` podem não existir em um clone novo. São criadas durante as execuções. A pasta `validacao_pipeline/` contém a referência utilizada para comparar os resultados. Arquivos de logs históricos eventualmente presentes nessa pasta são anteriores à nova organização; os **novos logs** ficam em `execucoes_pipeline/`.
+**Importante:** `dados/`, `saida/` e `execucoes_pipeline/` podem não existir em um clone novo. São criadas durante as execuções. A pasta `validacao_pipeline/` contém a referência utilizada para comparar os resultados. Os **logs** ficam em `execucoes_pipeline/`.
 
 ## 3. Fontes e arquitetura
 
@@ -100,21 +98,6 @@ Se `15432` estiver ocupada, por exemplo, troque apenas `"15432:5432"` por `"2543
 
 O Adminer fica em `http://localhost:8080`, ou na porta externa escolhida para o serviço.
 
-### 4.3 Healthcheck do MySQL: tolerância de inicialização
-
-Ao recriar o volume vazio, o MySQL precisa inicializar arquivos internos e preparar a base. Um teste anterior falhou com `container lab_mysql_legado is unhealthy` antes de o MySQL concluir a inicialização, embora tenha ficado saudável posteriormente. Por isso, a versão validada do `docker-compose.yml` inclui:
-
-```yaml
-healthcheck:
-  test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
-  interval: 5s
-  timeout: 5s
-  start_period: 240s
-  retries: 30
-```
-
-O `start_period: 240s` concede **quatro minutos de tolerância inicial**, sem obrigar o Docker a esperar os quatro minutos quando o MySQL já estiver saudável. Falhas de healthcheck durante esse período não contam como falhas consecutivas, exceto após um primeiro sucesso. Se o processo tiver um erro persistente, aumentar o período não corrige a causa. Os PostgreSQL mantêm seus próprios healthchecks.
-
 ## 5. Iniciando o ambiente pela primeira vez
 
 Na raiz do repositório:
@@ -156,7 +139,7 @@ docker compose exec -T etl python -u 05_exportar_orange.py
 
 ## 7. Automatizador `executar_pipeline.ps1`
 
-O script usa **somente uma flag opcional**: `-ReconstruirDoZero`. Não existe mais a antiga flag `-ConfirmarExclusao`.
+O script possui a flag opcional: `-ReconstruirDoZero`.
 
 ### 7.1 Modo normal (sem apagar volumes)
 
@@ -168,13 +151,13 @@ Nesse modo, o script **preserva os volumes e as pastas `dados/` e `saida/`**, ma
 
 ### 7.2 Modo destrutivo: reconstrução completa
 
-> **ATENÇÃO: operação destrutiva.** A simples presença da flag autoriza a exclusão dos volumes Docker vinculados ao projeto, de `dados/` e de `saida/`. O script não solicita uma segunda confirmação. Faça backup dos bancos e dos arquivos que precisar preservar.
+> **ATENÇÃO: operação destrutiva.** A presença da flag autoriza a exclusão dos volumes Docker vinculados ao projeto, de `dados/` e de `saida/`. Faça backup dos bancos e dos arquivos que precisar preservar.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\executar_pipeline.ps1 -ReconstruirDoZero
 ```
 
-Sequência real do script:
+Sequência do script (O modo normal só executa a 4 até a 6, já o modo destrutivo executa as 6):
 
 1. Executa `docker compose down -v --remove-orphans`, removendo os contêineres, a rede e os volumes nomeados do projeto.
 2. Exclui as pastas locais `dados/` e `saida/` e as recria vazias.
@@ -190,8 +173,6 @@ O script **não apaga** `docs/`, `etl/`, `sql/`, `dump_sql.zip`, `validacao_pipe
 ### 7.3 Logs e tratamento de erros
 
 O PowerShell usa `GravarLinha()` para registrar mensagens no arquivo e exibi-las no terminal. A função `ExecutarDocker()` captura `stdout` e `stderr` e confere o código de saída nativo do Docker. Assim, mensagens de progresso como `Image ... Building` e `Container ... Stopping` não são confundidas automaticamente com falhas no Windows PowerShell 5.1. Se o comando realmente terminar com código diferente de zero, o automatizador registra `[FALHA]` e encerra com código 1.
-
-A função antiga `escrever_log` não faz mais parte do script; as mensagens são centralizadas em `GravarLinha()`.
 
 ## 8. Referência, histórico e auditoria
 
@@ -295,8 +276,6 @@ O objetivo é analisar o efeito do vazamento sobre as métricas de avaliação, 
 | `etl/dados_orange/` | Imagens dos resultados |
 | `validacao_pipeline/referencia_pipeline.json` | Referência persistente para comparação |
 
-O relatório diagnóstico da Semana 1 e as versões finais em PDF do RDT e do experimento são entregues **diretamente ao professor**. Os arquivos originais recebidos do docente, incluindo `docs/PROFESSOR.md`, são mantidos sem alterações, conforme orientação.
-
 ## 13. Diagnóstico e soluções comuns
 
 ### 13.1 MySQL `unhealthy` durante a primeira criação
@@ -336,30 +315,3 @@ Execute as ABTs e a exportação. Reabra os widgets **File** e escolha os CSVs c
 ### 13.6 Terminal com acentos ou saída travada
 
 O PowerShell automatizado configura a saída em UTF-8. Em versões clássicas do console do Windows, desative o **QuickEdit / Edição Rápida** se selecionar texto estiver interrompendo a execução.
-
-## 14. Teste de reconstrução integral realizado
-
-No teste de 30/10/2026 registrado em `execucoes_pipeline/execucao-20261030-231111.log`, ocorreram os seguintes eventos:
-
-| Validação observada | Resultado |
-|---|---|
-| `docker compose down -v --remove-orphans` | Contêineres e volumes removidos |
-| Limpeza de `dados/` e `saida/` | Concluída |
-| Construção das imagens `seed` e `etl` | Concluída |
-| Bancos MySQL, PostgreSQL origem e PostgreSQL DW | Todos `healthy` |
-| Serviço `seed` e inicialização do `etl` | Concluídos |
-| Seis scripts do pipeline | Executados |
-| Asserções de QA | **28 aprovadas, 0 falhas** |
-| Auditoria de contagens, vínculos e ABTs | Aprovada |
-| Hashes dos CSVs correta e vazamento | **Ambos idênticos à referência** |
-| Tempo total com reconstrução | **677,8 segundos (11 min 17,8 s)** |
-
-Linhas finais registradas:
-
-```text
-[OK] CSV IDENTICO A REFERENCIA: abt_recompra_correta.csv
-[OK] CSV IDENTICO A REFERENCIA: abt_recompra_vazamento.csv
-[SUCESSO] Pipeline reexecutado e auditado em 677,8s
-```
-
-**Conclusão:** a equipe demonstrou a capacidade de reconstruir o ambiente a partir de volumes vazios e reproduzir os arquivos de saída de referência **em um único comando**. A duração pode variar entre computadores; a reprodutibilidade verificada diz respeito ao conteúdo dos CSVs e às regras de validação, não à igualdade dos tempos de execução.
