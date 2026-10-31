@@ -1,133 +1,365 @@
 # Laboratório de ETL — Mercatto Varejo
 
-Projeto prático de Mineração de Dados — IFMT, 2026/2.
+Projeto prático de **Mineração de Dados — IFMT, 2026/2**.
 
-O repositório integra quatro fontes heterogêneas (ERP MySQL/latin1, e-commerce PostgreSQL/UTF-8, SAC em CSV e avaliações em NDJSON), constrói um Data Warehouse e duas ABTs para estudar vazamento de dados na previsão de recompra.
+O projeto integra quatro fontes de dados (ERP MySQL, e-commerce PostgreSQL, SAC CSV e avaliações NDJSON), implementa um Data Warehouse em esquema estrela e produz duas ABTs (uma correta e outra intencionalmente contaminada por vazamento de dados) para estudar a previsão de recompra. Inclui controle de qualidade, auditoria automatizada, testes de reprodutibilidade e fluxos do Orange Data Mining.
 
-## 1. Requisitos
+> **Validação mais recente — 30/10/2026:** o teste com `-ReconstruirDoZero` removeu os volumes e pastas geradas, recriou o ambiente, iniciou os bancos e o gerador, executou as seis etapas, aprovou **28/28 asserções** e produziu **dois CSVs idênticos à referência SHA-256**, em **677,8 s (11 min 17,8 s)**. Evidência: log local `execucoes_pipeline/execucao-20261030-231111.log`, não incluído no Git.
 
-- Docker Desktop com Docker Compose v2;
-- cerca de 8 GB de RAM e espaço livre para gerar/carregar os dados;
-- Orange Data Mining instalado no computador (fora do Docker);
-- Windows PowerShell 5.1 ou outro terminal capaz de executar os comandos Docker.
+## 1. Pré-requisitos
 
-O arquivo `.env.example` define `ESCALA=1.0`, que corresponde aos volumes usados nos resultados entregues. Alterar a escala reduz a quantidade de registros e invalida as contagens fixas da auditoria adicional.
+- Docker Desktop iniciado e Docker Compose v2 disponível.
+- Windows PowerShell 5.1 para usar `executar_pipeline.ps1`; os comandos Docker individuais funcionam também em outros terminais.
+- Orange Data Mining instalado localmente para abrir os fluxos `.ows`.
+- Memória RAM e espaço em disco suficientes para a criação e a carga inicial dos bancos. Aproximadamente 8 GB de RAM ou mais é uma referência prática, dependente da máquina.
+- Acesso às imagens Docker, especialmente na primeira inicialização.
 
-## 2. Configuração das portas
+Para conferir o ambiente:
 
-**As portas que precisam estar livres no computador são as do lado esquerdo de `:` no `docker-compose.yml`.** A porta à direita pertence ao contêiner e normalmente não precisa ser alterada.
+```powershell
+docker --version
+docker compose version
+docker compose config --quiet
+```
 
-| Serviço | Entrada em `docker-compose.yml` | Porta externa atual | Finalidade |
-|---|---|---:|---|
-| `mysql_legado` | `"3307:3306"` | 3307 | MySQL da origem legado |
-| `pg_ecommerce` | `"15432:5432"` | 15432 | PostgreSQL da origem e-commerce |
-| `pg_dw` | `"15433:5432"` | 15433 | PostgreSQL de destino |
-| `adminer` | `"8080:8080"` | 8080 | Interface web para consultar os bancos |
+## 2. Estrutura do projeto
 
-**Exemplo:** se a porta `15432` estiver ocupada, altere somente `"15432:5432"` para `"25432:5432"` em `docker-compose.yml`. A nova porta externa será 25432. O mesmo se aplica às demais portas. Depois, execute `docker compose up -d --build` para recriar o serviço com a nova publicação de portas.
+```text
+lab-etl-varejo/
+├── .env.example                     # Escala dos dados gerados
+├── docker-compose.yml              # Serviços e healthchecks
+├── executar_pipeline.ps1           # Reexecução, reconstrução e auditoria
+├── gerador/                        # Gerador determinístico e carga inicial
+├── sql/                            # Esquemas SQL
+├── etl/
+│   ├── 00_perfilamento.py
+│   ├── 01_extracao.py
+│   ├── 02_transformacao.py
+│   ├── 03_carga_dw.py
+│   ├── 04_abt.py
+│   ├── 05_exportar_orange.py
+│   ├── auditar_pipeline.py
+│   ├── experimento_normalizacao.py
+│   ├── qualidade/                  # Asserções
+│   ├── orange/                     # Workflows .ows
+│   └── dados_orange/               # Capturas de resultados
+├── docs/                           # RDT e relatório em Markdown
+├── dump_sql.zip                    # Dump compactado fornecido no repositório
+├── validacao_pipeline/
+│   └── referencia_pipeline.json    # Referência persistente
+├── execucoes_pipeline/             # Logs locais, ignorados pelo Git
+├── dados/                          # Dados gerados, ignorados pelo Git
+└── saida/                          # CSVs e auditoria, ignorados pelo Git
+```
 
-As conexões Python dos serviços usam os nomes internos `mysql_legado`, `pg_ecommerce` e `pg_dw` e **continuam nas portas internas 3306 e 5432**; não altere os DSNs em `etl/config.py` por causa de uma colisão de portas do Windows. Acesse o Adminer em `http://localhost:8080` ou na porta externa escolhida para ele.
+**Importante:** `dados/`, `saida/` e `execucoes_pipeline/` podem não existir em um clone novo. São criadas durante as execuções. A pasta `validacao_pipeline/` contém a referência utilizada para comparar os resultados. Arquivos de logs históricos eventualmente presentes nessa pasta são anteriores à nova organização; os **novos logs** ficam em `execucoes_pipeline/`.
 
-## 3. Iniciar o ambiente pela primeira vez
+## 3. Fontes e arquitetura
 
-No PowerShell, na raiz do repositório:
+| Origem | Tecnologia e codificação | Dados |
+|---|---|---|
+| ERP legado | MySQL 8, `latin1` | Clientes, produtos, pedidos e itens |
+| E-commerce | PostgreSQL 16, UTF-8 | Clientes, produtos, pedidos, itens e categorias |
+| SAC | CSV `latin-1`, delimitador `;` | Atendimentos |
+| Marketplace | NDJSON UTF-8 | Avaliações |
+
+Fluxo: **fontes → staging (`stg`) → transformação e conformação → dimensões e fatos (`dw`) → ABTs (`abt`) → CSVs → Orange**.
+
+O Compose inclui os serviços `mysql_legado`, `pg_ecommerce`, `pg_dw`, `seed`, `etl` e `adminer`. O `seed` gera e carrega os dados, criando os esquemas e finalizando a tarefa. O `etl` executa os scripts Python, enquanto o Adminer permite consultar os bancos pelo navegador.
+
+## 4. Configuração inicial
+
+### 4.1 Escala
+
+Na raiz do repositório, se o arquivo `.env` ainda não existir:
 
 ```powershell
 Copy-Item .env.example .env
-# Se necessário, ajuste ESCALA em .env ANTES de gerar os dados.
-docker compose up -d --build
-docker compose ps -a
-docker compose logs seed
 ```
 
-A inicialização inclui um serviço `seed` que gera os dados determinísticos, cria esquemas e carrega as fontes. Aguarde a mensagem `ambiente pronto.` no log do `seed` e verifique se o serviço `etl` está disponível antes de rodar a extração.
+A configuração validada é:
 
-Não coloque arquivos SQL de dump no lugar dos scripts de carga: o pipeline normal constrói tudo a partir das fontes geradas.
+```dotenv
+ESCALA=1.0
+```
 
-## 4. Executar o ETL
+**Mantenha `ESCALA=1.0` para reproduzir as contagens e os hashes de referência.** Outras escalas alteram a quantidade de registros gerados e podem invalidar os valores fixos de `etl/auditar_pipeline.py`.
 
-### Forma oficial: seis comandos na ordem do professor
+### 4.2 Portas externas
+
+As portas do **lado esquerdo** da expressão `HOST:CONTAINER` são publicadas no computador local; as do lado direito são usadas dentro dos contêineres.
+
+| Serviço | Configuração atual | Aplicação |
+|---|---|---|
+| `mysql_legado` | `3307:3306` | ERP legado |
+| `pg_ecommerce` | `15432:5432` | E-commerce |
+| `pg_dw` | `15433:5432` | DW |
+| `adminer` | `8080:8080` | Interface web |
+
+Se `15432` estiver ocupada, por exemplo, troque apenas `"15432:5432"` por `"25432:5432"` em `docker-compose.yml`. Depois use `docker compose up -d`. As conexões Python entre contêineres continuam usando `mysql_legado:3306`, `pg_ecommerce:5432` e `pg_dw:5432`; **não altere os DSNs internos de `etl/config.py` só por causa de uma colisão de porta no Windows**.
+
+O Adminer fica em `http://localhost:8080`, ou na porta externa escolhida para o serviço.
+
+### 4.3 Healthcheck do MySQL: tolerância de inicialização
+
+Ao recriar o volume vazio, o MySQL precisa inicializar arquivos internos e preparar a base. Um teste anterior falhou com `container lab_mysql_legado is unhealthy` antes de o MySQL concluir a inicialização, embora tenha ficado saudável posteriormente. Por isso, a versão validada do `docker-compose.yml` inclui:
+
+```yaml
+healthcheck:
+  test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+  interval: 5s
+  timeout: 5s
+  start_period: 240s
+  retries: 30
+```
+
+O `start_period: 240s` concede **quatro minutos de tolerância inicial**, sem obrigar o Docker a esperar os quatro minutos quando o MySQL já estiver saudável. Falhas de healthcheck durante esse período não contam como falhas consecutivas, exceto após um primeiro sucesso. Se o processo tiver um erro persistente, aumentar o período não corrige a causa. Os PostgreSQL mantêm seus próprios healthchecks.
+
+## 5. Iniciando o ambiente pela primeira vez
+
+Na raiz do repositório:
 
 ```powershell
-docker compose exec -T etl python 01_extracao.py
-docker compose exec -T etl python 02_transformacao.py
-docker compose exec -T etl python 03_carga_dw.py
-docker compose exec -T etl python 04_abt.py --correta
-docker compose exec -T etl python 04_abt.py --vazamento
-docker compose exec -T etl python 05_exportar_orange.py
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps -a
+docker compose logs --tail=60 seed
 ```
 
-### Execução com auditoria automatizada (sem exclusão)
+Verifique se os três bancos estão marcados como `healthy`, se `seed` terminou com **`Exited (0)`** e a mensagem **`ambiente pronto.`**, e se `etl` está `Up`. O `seed` é uma tarefa de inicialização: **`Exited (0)` indica sucesso, não falha**. O Compose só inicia o `seed` depois que os três bancos estiverem saudáveis e só libera o `etl` depois de o `seed` terminar com sucesso.
+
+Não é necessário restaurar manualmente o `dump_sql.zip` para realizar o procedimento normal: o ambiente é gerado e carregado pelas rotinas do projeto.
+
+## 6. Executando as seis etapas oficiais
+
+Os comandos são executados nesta ordem:
+
+```powershell
+docker compose exec -T etl python -u 01_extracao.py
+docker compose exec -T etl python -u 02_transformacao.py
+docker compose exec -T etl python -u 03_carga_dw.py
+docker compose exec -T etl python -u 04_abt.py --correta
+docker compose exec -T etl python -u 04_abt.py --vazamento
+docker compose exec -T etl python -u 05_exportar_orange.py
+```
+
+| Etapa | Objetivo |
+|---|---|
+| `01_extracao.py` | Ler as quatro fontes e preencher a camada `stg` |
+| `02_transformacao.py` | Conformar clientes, status, valores, datas, categorias e relacionamentos |
+| `03_carga_dw.py` | Carregar e validar tabelas dimensionais e fatos |
+| `04_abt.py --correta` | Gerar atributos históricos até a data de corte |
+| `04_abt.py --vazamento` | Gerar o cenário contaminado intencionalmente |
+| `05_exportar_orange.py` | Exportar as duas ABTs no formato Orange |
+
+`-T` desativa a alocação de terminal interativo; `-u` faz o Python exibir a saída sem buffer. O perfilamento pode ser executado separadamente, se necessário, com `docker compose exec -T etl python -u 00_perfilamento.py`. Ele não integra os seis comandos do automatizador.
+
+## 7. Automatizador `executar_pipeline.ps1`
+
+O script usa **somente uma flag opcional**: `-ReconstruirDoZero`. Não existe mais a antiga flag `-ConfirmarExclusao`.
+
+### 7.1 Modo normal (sem apagar volumes)
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\executar_pipeline.ps1
 ```
 
-Esse comando preserva volumes e as fontes geradas; executa as seis etapas, confere as asserções novas, quantidades de registros e assinaturas SHA-256 dos CSVs. Salva o log em `validacao_pipeline/execucao-*.log`, a referência em `validacao_pipeline/referencia_pipeline.json` e a auditoria da última execução em `saida/auditoria_pipeline.json`.
+Nesse modo, o script **preserva os volumes e as pastas `dados/` e `saida/`**, mas **reprocessa as etapas**: os dados de destino e CSVs podem ser sobrescritos pelos scripts Python. É necessário que os contêineres e o `seed` estejam disponíveis e prontos.
 
-### Reconstrução do zero — DESTRUTIVA, somente com autorização explícita
+### 7.2 Modo destrutivo: reconstrução completa
 
-**CUIDADO:** a opção abaixo remove os volumes dos bancos do projeto e exclui as pastas geradas `dados/` e `saida/`, incluindo os CSVs. Faça backup antes. Não execute em conjunto com outras instâncias que usem o mesmo projeto Docker Compose.
+> **ATENÇÃO: operação destrutiva.** A simples presença da flag autoriza a exclusão dos volumes Docker vinculados ao projeto, de `dados/` e de `saida/`. O script não solicita uma segunda confirmação. Faça backup dos bancos e dos arquivos que precisar preservar.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\executar_pipeline.ps1 -ReconstruirDoZero -ConfirmarExclusao
+powershell -NoProfile -ExecutionPolicy Bypass -File .\executar_pipeline.ps1 -ReconstruirDoZero
 ```
 
-A reconstrução executa `docker compose down -v --remove-orphans`, remove apenas `dados/` e `saida/`, sobe tudo com `docker compose up -d --build`, executa os seis comandos oficiais e confere as mesmas auditorias. A referência em `validacao_pipeline/` é preservada para permitir comparar o resultado de uma geração limpa com o resultado anterior. **Nunca use a flag destrutiva sem cópia do banco/dump quando precisar preservar dados.**
+Sequência real do script:
 
-Se for demonstrar isso ao professor, prefira fazê-lo numa cópia isolada do ambiente. Apenas copiar a pasta não isola volumes quando o projeto Compose tem o mesmo nome; certifique-se de que não esteja apontando para a instalação original.
+1. Executa `docker compose down -v --remove-orphans`, removendo os contêineres, a rede e os volumes nomeados do projeto.
+2. Exclui as pastas locais `dados/` e `saida/` e as recria vazias.
+3. Executa `docker compose up -d --build` e acompanha a geração das imagens, a saúde dos bancos e a conclusão do `seed`.
+4. Executa os seis scripts Python na ordem prevista.
+5. Executa `etl/auditar_pipeline.py` e gera `saida/auditoria_pipeline.json`.
+6. Compara os hashes SHA-256 dos dois CSVs com a referência persistente e registra `[SUCESSO]` ou `[FALHA]`.
 
-## 5. Saídas e experimentos no Orange
+O script **não apaga** `docs/`, `etl/`, `sql/`, `dump_sql.zip`, `validacao_pipeline/` ou `execucoes_pipeline/`. O tempo total inclui também a reconstrução do Docker.
 
-Depois da execução das etapas, o exportador gera os arquivos abaixo na pasta `saida/` (no contêiner: `/saida`). **Esses arquivos são gerados, e por isso não são incluídos no Git por padrão.**
+**Clones paralelos:** o Compose usa o nome fixo de projeto `lab-etl-varejo` e nomes de contêineres fixos. Copiar a pasta do projeto não isola automaticamente os volumes/contêineres. Não execute a reconstrução destrutiva quando outra cópia estiver usando os mesmos recursos Docker.
 
-| Fluxo `.ows` (em `etl/orange/`) | Arquivo(s) de entrada (em `saida/`) | Como gerar |
+### 7.3 Logs e tratamento de erros
+
+O PowerShell usa `GravarLinha()` para registrar mensagens no arquivo e exibi-las no terminal. A função `ExecutarDocker()` captura `stdout` e `stderr` e confere o código de saída nativo do Docker. Assim, mensagens de progresso como `Image ... Building` e `Container ... Stopping` não são confundidas automaticamente com falhas no Windows PowerShell 5.1. Se o comando realmente terminar com código diferente de zero, o automatizador registra `[FALHA]` e encerra com código 1.
+
+A função antiga `escrever_log` não faz mais parte do script; as mensagens são centralizadas em `GravarLinha()`.
+
+## 8. Referência, histórico e auditoria
+
+| Caminho | Finalidade | Preservado após reconstrução? |
 |---|---|---|
-| `mercatto_abt_correta.ows` | `abt_recompra_correta.csv` | Rodar as seis etapas ou `05_exportar_orange.py` após a ABT correta |
-| `mercatto_abt_vazamento.ows` | `abt_recompra_vazamento.csv` | Rodar as seis etapas ou `05_exportar_orange.py` após a ABT contaminada |
-| `mercatto_normalizacao_segura.ows` | `abt_norm_segura_treino.csv` **e** `abt_norm_segura_teste.csv` | Após gerar `abt_recompra_correta.csv`, rodar `experimento_normalizacao.py` |
-| `mercatto_normalizacao_global.ows` | `abt_norm_global_treino.csv` **e** `abt_norm_global_teste.csv` | Após gerar `abt_recompra_correta.csv`, rodar `experimento_normalizacao.py` |
+| `validacao_pipeline/referencia_pipeline.json` | Auditoria de referência persistente | **Sim** |
+| `execucoes_pipeline/execucao-AAAAMMDD-HHMMSS.log` | Log local de cada execução | **Sim** |
+| `saida/auditoria_pipeline.json` | Resultado da auditoria atual | Não: regenerado |
+| `saida/abt_recompra_correta.csv` | ABT correta exportada | Não: regenerado |
+| `saida/abt_recompra_vazamento.csv` | ABT experimental exportada | Não: regenerado |
 
-Para gerar os quatro CSVs do experimento de normalização:
+O script registra o último identificador em `qa.execucao_assercao` **antes** da execução. Esse valor é passado à auditoria por `--desde-id`, para considerar somente as novas asserções. Em um banco completamente novo, o ID anterior é `0`. As asserções permanecem no histórico do banco enquanto os volumes forem preservados.
+
+A auditoria Python confere contagens, integridade de vínculos, atributos, alvo e cabeçalhos Orange (três linhas). Os arquivos CSV são ordenados logicamente por `cliente_sk` antes da produção do hash, permitindo comparar conteúdo independentemente da ordem original das linhas.
+
+**Primeira execução:** caso `validacao_pipeline/referencia_pipeline.json` ainda não exista, o script copia o JSON atual para criá-la. Nesse primeiro caso, **não existe comparação com execução anterior** e a referência deve ser revisada. **Execuções seguintes:** se a referência existir, o script compara o SHA-256 dos dois CSVs; se qualquer hash divergir, falha, sem sobrescrever automaticamente a referência.
+
+O arquivo `validacao_pipeline/referencia_pipeline.json` é versionado. Os novos logs, os CSVs e o JSON de auditoria atual ficam fora do Git, conforme `.gitignore`.
+
+## 9. Saídas esperadas com `ESCALA=1.0`
+
+| Tabela / indicador | Quantidade |
+|---|---:|
+| `dw.dim_cliente` | 115.674 |
+| `dw.dim_produto` | 15.000 |
+| `dw.dim_status` | 9 |
+| `dw.dim_canal` | 3 |
+| `dw.fato_pedido` | 410.000 |
+| `dw.fato_item_pedido` | 1.371.876 |
+| `dw.fato_atendimento` | 95.000 |
+| `dw.fato_avaliacao` | 160.000 |
+| Cada ABT (`abt.recompra_90d` / `abt.recompra_90d_vazamento`) | 108.064 linhas |
+| Colunas de cada ABT / CSV | 18 (15 atributos, 2 metadados, 1 alvo) |
+| Clientes com recompra positiva | 24.043 (aprox. 22,25%) |
+
+A carga identifica 5.868 itens órfãos na origem legada e 14.709 na origem e-commerce. Os itens permanecem no staging e não são associados artificialmente a pedidos no DW.
+
+A auditoria do pipeline espera **28 asserções aprovadas**, distribuídas em 11 (extração), 4 (transformação), 4 (DW), 5 (ABT correta) e 4 (ABT com vazamento). Com `ESCALA=1.0`, também confere as contagens esperadas de 21 tabelas.
+
+## 10. Orange Data Mining
+
+**Os CSVs devem ser gerados localmente antes de abrir os workflows `.ows` em outro computador.**
+
+| Workflow em `etl/orange/` | Arquivo(s) em `saida/` | Como gerar |
+|---|---|---|
+| `mercatto_abt_correta.ows` | `abt_recompra_correta.csv` | Executar as seis etapas ou exportador após a ABT correta |
+| `mercatto_abt_vazamento.ows` | `abt_recompra_vazamento.csv` | Executar as seis etapas ou exportador após a ABT com vazamento |
+| `mercatto_normalizacao_segura.ows` | `abt_norm_segura_treino.csv`, `abt_norm_segura_teste.csv` | Executar `experimento_normalizacao.py` |
+| `mercatto_normalizacao_global.ows` | `abt_norm_global_treino.csv`, `abt_norm_global_teste.csv` | Executar `experimento_normalizacao.py` |
+
+Para gerar os quatro arquivos adicionais de normalização **depois** de ter gerado `abt_recompra_correta.csv`:
 
 ```powershell
-docker compose exec -T etl python experimento_normalizacao.py
+docker compose exec -T etl python -u experimento_normalizacao.py
 ```
 
-Abra cada `.ows` no Orange. Se o widget **File** indicar arquivo ausente, use **Browse** e selecione o CSV correspondente na pasta `saida/` da máquina local. Os caminhos salvos dentro dos `.ows` podem apontar para o computador da equipe e precisar ser redefinidos ao abrir em outro PC.
+**Esse experimento auxiliar não faz parte das seis etapas automatizadas.**
 
-Nos dois experimentos principais, confirme que `Data Sampler` envia **Data Sample** (70%) para `Data` do `Test & Score` e **Remaining Data** (30%) para `Test Data`, com amostragem estratificada e mesma configuração/partição nas duas versões. Nos experimentos de normalização, já existem arquivos de treino e teste separados: use dois widgets File diretamente no Test & Score e selecione **Test on test data**. Os modelos são Naive Bayes, Logistic Regression e Tree, com visualizações Confusion Matrix e ROC Analysis.
+### 10.1 Abrir o `.ows` em outra máquina
 
-As capturas de resultados estão em `etl/dados_orange/`.
+1. Abra o arquivo `.ows` no Orange.
+2. Entre em cada widget **File**; se o caminho estiver inválido, escolha **Browse** e localize os CSVs correspondentes dentro da pasta local `saida/`.
+3. Confirme `alvo_recompra_90d` como classe, e `cliente_sk` e `data_corte` como metadados (não como atributos preditivos).
+4. Abra **Test & Score**, **Confusion Matrix** e **ROC Analysis**.
 
-## 6. Saídas esperadas (ESCALA=1.0)
+Os `.ows` podem conter caminhos absolutos utilizados no computador em que foram salvos; portanto, será necessário selecionar novamente os arquivos em outros computadores.
 
-- `dw.fato_pedido`: **410.000** pedidos;
-- `dw.fato_item_pedido`: **1.371.876** itens vinculados;
-- `dw.fato_atendimento`: **95.000** protocolos únicos;
-- `dw.fato_avaliacao`: **160.000** avaliações;
-- `abt.recompra_90d` e `abt.recompra_90d_vazamento`: **108.064** clientes, **18** colunas (15 atributos, 2 metadados, 1 classe);
-- recompras positivas: **24.043** em cada ABT.
+### 10.2 Fluxos principais (correta e vazamento)
 
-As asserções são persistidas em `qa.execucao_assercao`. Os scripts Python não substituem os registros antigos automaticamente, por isso o número total de linhas no QA cresce entre execuções; a auditoria adicional seleciona asserções a partir do último ID antes da execução.
+Os dois workflows usam **File → Data Sampler**, com a saída **Data Sample** para a entrada **Data** de **Test & Score** e a saída **Remaining Data** para a entrada **Test Data**. Os três modelos **Naive Bayes**, **Logistic Regression** e **Tree** são ligados como *Learners* independentes ao Test & Score. As saídas do Test & Score seguem para a matriz de confusão e o gráfico ROC.
 
-## 7. Artefatos de entrega
+Utilize amostragem **70/30 estratificada** e configurações equivalentes para uma comparação válida. A diferença intencional entre os fluxos principais é a ABT usada como entrada.
 
-- `docs/RDT - 1 a 15.md`: texto das 15 fichas, tabela-resumo e reflexão;
-- `docs/Relatorio_Final_Experimento_Vazamento_Mercatto.md`: versão editável do relatório experimental;
-- os PDFs correspondentes são enviados diretamente ao professor;
-- `dump_sql.zip`: exportação do DW e do histórico de asserções, entregue em formato compactado;
-- `etl/orange/*.ows`: fluxos do Orange;
-- `etl/dados_orange/`: capturas de Test & Score, matrizes de confusão e ROC;
-- relatório diagnóstico da Semana 1: entregue diretamente ao professor.
+### 10.3 Fluxos auxiliares de normalização
 
-Os arquivos fornecidos originalmente pelo professor, incluindo `docs/PROFESSOR.md`, são preservados sem alterações conforme orientação recebida.
+Nesses workflows, são usados **dois widgets File**: um para treino e outro para teste. Eles se conectam diretamente às entradas **Data** e **Test Data** do **Test & Score**, respectivamente. **Não é preciso dividir esses arquivos novamente**, pois a separação estratificada e determinística já foi feita pelo script `experimento_normalizacao.py`.
 
-## 8. Observações e problemas comuns
+As capturas dos resultados, incluindo Test & Score, Confusion Matrix e ROC, estão em `etl/dados_orange/`.
 
-- **Porta em uso:** altere apenas a porta externa no `docker-compose.yml`, na seção `ports:` do serviço correspondente.
-- **Dados `latin1`:** a origem MySQL e o CSV do SAC não devem ser lidos como UTF-8; as conexões e o script já tratam isso.
-- **Fonte não gerada:** confira `docker compose logs seed` e o status do contêiner `lab_seed`.
-- **CSV ausente no Orange:** rode a exportação após as duas ABTs; depois selecione os arquivos corretos no widget File.
-- **Acentos corrompidos no console clássico:** utilize PowerShell com saída UTF-8; o script configura a codificação. Se a janela parar ao selecionar texto, desative o QuickEdit nas propriedades do console.
-- **Volumes existentes:** a execução normal não limpa o ambiente. A reconstrução do zero exige as duas flags explícitas.
+## 11. Experimento temporal e vazamento de dados
+
+A questão analítica é: **com o histórico de compras até 30/06/2025, o cliente fará uma nova compra nos 90 dias seguintes?**
+
+- **Data de corte:** `2025-06-30`.
+- **Janela de previsão:** `2025-07-01` a `2025-09-28`.
+- **ABT correta:** os atributos preditivos usam dados disponíveis até o corte; o intervalo futuro serve apenas à definição do alvo.
+- **ABT com vazamento:** inclui intencionalmente atributos calculados com dados após o corte e normalização global anterior à separação treino/teste.
+
+O experimento auxiliar de normalização avalia especificamente a diferença entre calcular o z-score com **treino apenas** (seguro) e com **a base inteira** antes da divisão (vazamento), mantendo os mesmos registros e alvos.
+
+O objetivo é analisar o efeito do vazamento sobre as métricas de avaliação, não apenas alcançar AUCs maiores.
+
+## 12. Artefatos de entrega
+
+| Arquivo ou pasta | Finalidade |
+|---|---|
+| `docs/RDT - 1 a 15.md` | 15 fichas, tabela-resumo e reflexão |
+| `docs/Relatorio_Final_Experimento_Vazamento_Mercatto.md` | Texto editável do relatório experimental |
+| `dump_sql.zip` | Dump compactado publicado no repositório |
+| `etl/orange/*.ows` | Workflows do Orange |
+| `etl/dados_orange/` | Imagens dos resultados |
+| `validacao_pipeline/referencia_pipeline.json` | Referência persistente para comparação |
+
+O relatório diagnóstico da Semana 1 e as versões finais em PDF do RDT e do experimento são entregues **diretamente ao professor**. Os arquivos originais recebidos do docente, incluindo `docs/PROFESSOR.md`, são mantidos sem alterações, conforme orientação.
+
+## 13. Diagnóstico e soluções comuns
+
+### 13.1 MySQL `unhealthy` durante a primeira criação
+
+```powershell
+docker compose ps -a
+docker compose logs --tail=100 mysql_legado
+docker inspect lab_mysql_legado --format '{{json .State.Health}}'
+```
+
+Confirme o `start_period: 240s`. Se o MySQL estiver `healthy` depois de uma interrupção, tente **retomar sem destruir volumes novamente**:
+
+```powershell
+docker compose up -d
+docker compose ps -a
+docker compose logs --tail=60 seed
+```
+
+Quando `seed` terminar com código zero e `etl` ficar `Up`, use o **modo normal** do `executar_pipeline.ps1` para completar as etapas.
+
+### 13.2 `seed` não terminou
+
+Verifique `docker compose logs --tail=100 seed` e `docker compose ps -a`. O `seed` só roda quando os bancos estão saudáveis; o `etl` depende de sua conclusão com êxito.
+
+### 13.3 Porta externa ocupada
+
+Altere **somente a porta externa** em `docker-compose.yml` e valide com `docker compose config --quiet`. Não mude a porta interna de conexão de outro contêiner.
+
+### 13.4 `HASH DIFERENTE` ou auditoria reprovada
+
+Confira `ESCALA=1.0`, a referência em `validacao_pipeline/`, o JSON atual em `saida/` e o log em `execucoes_pipeline/`. **Não substitua o JSON de referência apenas para ocultar divergências.** Para executar o auditor isoladamente é necessário passar o ID registrado antes do conjunto de asserções que se deseja validar.
+
+### 13.5 CSV ausente no Orange
+
+Execute as ABTs e a exportação. Reabra os widgets **File** e escolha os CSVs corretos da pasta `saida/`.
+
+### 13.6 Terminal com acentos ou saída travada
+
+O PowerShell automatizado configura a saída em UTF-8. Em versões clássicas do console do Windows, desative o **QuickEdit / Edição Rápida** se selecionar texto estiver interrompendo a execução.
+
+## 14. Teste de reconstrução integral realizado
+
+No teste de 30/10/2026 registrado em `execucoes_pipeline/execucao-20261030-231111.log`, ocorreram os seguintes eventos:
+
+| Validação observada | Resultado |
+|---|---|
+| `docker compose down -v --remove-orphans` | Contêineres e volumes removidos |
+| Limpeza de `dados/` e `saida/` | Concluída |
+| Construção das imagens `seed` e `etl` | Concluída |
+| Bancos MySQL, PostgreSQL origem e PostgreSQL DW | Todos `healthy` |
+| Serviço `seed` e inicialização do `etl` | Concluídos |
+| Seis scripts do pipeline | Executados |
+| Asserções de QA | **28 aprovadas, 0 falhas** |
+| Auditoria de contagens, vínculos e ABTs | Aprovada |
+| Hashes dos CSVs correta e vazamento | **Ambos idênticos à referência** |
+| Tempo total com reconstrução | **677,8 segundos (11 min 17,8 s)** |
+
+Linhas finais registradas:
+
+```text
+[OK] CSV IDENTICO A REFERENCIA: abt_recompra_correta.csv
+[OK] CSV IDENTICO A REFERENCIA: abt_recompra_vazamento.csv
+[SUCESSO] Pipeline reexecutado e auditado em 677,8s
+```
+
+**Conclusão:** a equipe demonstrou a capacidade de reconstruir o ambiente a partir de volumes vazios e reproduzir os arquivos de saída de referência **em um único comando**. A duração pode variar entre computadores; a reprodutibilidade verificada diz respeito ao conteúdo dos CSVs e às regras de validação, não à igualdade dos tempos de execução.
