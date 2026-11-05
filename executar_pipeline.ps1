@@ -50,10 +50,12 @@ foreach ($arquivo in @(
 }
 
 
-# Garante que o comando Docker esteja disponível
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    throw 'Docker nao encontrado no PATH.'
+# Localiza especificamente o executável Docker para Windows.
+$comandoDocker = Get-Command docker.exe -CommandType Application -ErrorAction SilentlyContinue
+if (-not $comandoDocker) {
+    throw 'Docker Desktop nao encontrado no PATH.'
 }
+$dockerExe = $comandoDocker.Source
 
 
 # Define os caminhos das pastas
@@ -84,7 +86,7 @@ function ExecutarDocker([string[]]$argumentos) {
     $preferenciaAnterior = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & docker @argumentos 2>&1 | ForEach-Object {
+        & $dockerExe @argumentos 2>&1 | ForEach-Object {
             GravarLinha ([string]$_)
         }
         $codigo = $LASTEXITCODE
@@ -132,7 +134,7 @@ try {
     $preferenciaAnterior = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $idTexto = & docker compose exec -T etl python -c $consultaQa 2>&1
+        $idTexto = & $dockerExe compose exec -T etl python -c $consultaQa 2>&1
         $codigo = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $preferenciaAnterior
