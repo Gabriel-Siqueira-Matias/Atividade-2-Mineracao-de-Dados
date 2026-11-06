@@ -4,6 +4,38 @@ Projeto prático de **Mineração de Dados — IFMT, 2026/2**.
 
 O projeto integra quatro fontes de dados (ERP MySQL, e-commerce PostgreSQL, SAC CSV e avaliações NDJSON), implementa um Data Warehouse em esquema estrela e produz duas ABTs (uma correta e outra intencionalmente contaminada por vazamento de dados) para estudar a previsão de recompra. Inclui controle de qualidade, auditoria automatizada, testes de reprodutibilidade e fluxos do Orange Data Mining.
 
+## Sumário
+
+- [1. Pré-requisitos](#1-pré-requisitos)
+- [2. Estrutura do projeto](#2-estrutura-do-projeto)
+- [3. Fontes e arquitetura](#3-fontes-e-arquitetura)
+- [4. Configuração inicial](#4-configuração-inicial)
+  - [4.1 Escala](#41-escala)
+  - [4.2 Portas externas](#42-portas-externas)
+- [5. Iniciando o ambiente pela primeira vez](#5-iniciando-o-ambiente-pela-primeira-vez)
+- [6. Executando as seis etapas oficiais](#6-executando-as-seis-etapas-oficiais)
+- [7. Automatizador `executar_pipeline.ps1`](#7-automatizador-executarpipelineps1)
+  - [7.1 Modo normal (sem apagar volumes)](#71-modo-normal-sem-apagar-volumes)
+  - [7.2 Modo destrutivo: reconstrução completa](#72-modo-destrutivo-reconstrução-completa)
+  - [7.3 Logs e tratamento de erros](#73-logs-e-tratamento-de-erros)
+- [8. Referência, histórico e auditoria](#8-referência-histórico-e-auditoria)
+- [9. Saídas esperadas com `ESCALA=1.0`](#9-saídas-esperadas-com-escala10)
+- [10. Orange Data Mining](#10-orange-data-mining)
+  - [10.1 Abrir o `.ows` em outra máquina](#101-abrir-o-ows-em-outra-máquina)
+  - [10.2 Fluxos principais (correta e vazamento)](#102-fluxos-principais-correta-e-vazamento)
+  - [10.3 Fluxos auxiliares de normalização](#103-fluxos-auxiliares-de-normalização)
+- [11. Experimento temporal e vazamento de dados](#11-experimento-temporal-e-vazamento-de-dados)
+- [12. Artefatos de entrega](#12-artefatos-de-entrega)
+- [13. Diagnóstico e soluções comuns](#13-diagnóstico-e-soluções-comuns)
+  - [13.1 MySQL `unhealthy` durante a primeira criação](#131-mysql-unhealthy-durante-a-primeira-criação)
+  - [13.2 `seed` não terminou](#132-seed-não-terminou)
+  - [13.3 Porta externa ocupada](#133-porta-externa-ocupada)
+  - [13.4 `HASH DIFERENTE` ou auditoria reprovada](#134-hash-diferente-ou-auditoria-reprovada)
+  - [13.5 CSV ausente no Orange](#135-csv-ausente-no-orange)
+  - [13.6 Terminal com acentos ou saída travada](#136-terminal-com-acentos-ou-saída-travada)
+
+---
+
 ## 1. Pré-requisitos
 
 - Docker Desktop iniciado e Docker Compose v2 disponível.
