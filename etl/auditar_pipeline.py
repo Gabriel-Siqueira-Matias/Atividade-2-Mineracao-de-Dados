@@ -9,17 +9,20 @@ Cria /saida/auditoria_pipeline.json para comparação com uma execução futura.
 Não modifica as tabelas do ETL nem substitui as asserções oficiais.
 """
 
-import argparse
-import csv
-import hashlib
-import json
-from collections import Counter
-from pathlib import Path
 
+import csv
+import json
+import hashlib
+import argparse
+from pathlib import Path
 from sqlalchemy import text
+from collections import Counter
 from config import DIR_SAIDA, eng_dw
 
 
+# ---------------------------------------------------------------------------
+# Funções auxiliares para formatar as mensagens exibidas no terminal
+# ---------------------------------------------------------------------------
 def secao(titulo):
     """Cabeçalho visual da auditoria final do pipeline."""
     print("\n" + "=" * 72)
@@ -36,6 +39,8 @@ def ok(mensagem):
     """Mensagem de sucesso padronizada."""
     print(f"[OK] {mensagem}")
 
+
+# Dicionário com os volumes esperados de registros por tabela no DW, Staging e ABTs
 CONTAGENS = {
     "stg.legado_clientes": 47250,
     "stg.legado_produtos": 3000,
@@ -60,6 +65,7 @@ CONTAGENS = {
     "abt.recompra_90d_vazamento": 108064,
 }
 
+# Dicionário com a quantidade mínima exigida de asserções de QA aprovadas por etapa
 ETAPAS_QA = {
     "01_extracao": 11,  # 4 ERP + 5 ECOM + SAC + avaliações
     "02_transformacao": 4,
@@ -68,15 +74,14 @@ ETAPAS_QA = {
     "04_abt_vazamento": 4,
 }
 
+# Mapeamento dos arquivos CSV exportados para suas respectivas tabelas no banco de dados
 CSV_ARQUIVOS = {
     "abt_recompra_correta.csv": "abt.recompra_90d",
     "abt_recompra_vazamento.csv": "abt.recompra_90d_vazamento",
 }
 
 
-# ---------------------------------------------------------------------------
-# Validação dos CSVs exportados para o Orange
-# ---------------------------------------------------------------------------
+# Validação estrutural e de conteúdo dos arquivos exportados
 def csv_referencia(path, esperado, anterior=None):
     """Assinatura independente da ordem das linhas, ignorando nenhuma coluna."""
     with path.open("r", newline="", encoding="utf-8-sig") as arq:
@@ -137,6 +142,7 @@ def csv_referencia(path, esperado, anterior=None):
     }, alvos
 
 
+# Função principal de auditoria que valida contagens, indicadores, logs de QA e arquivos CSV
 def auditar(desde_id):
     """Executa a auditoria final sem alterar nenhum dado do projeto."""
     resumo = {"versao": 1, "esperados_escala": "ESCALA=1.0", "contagens": {}, "indicadores": {}, "qa": {}, "csv": {}}
@@ -144,6 +150,7 @@ def auditar(desde_id):
     info("Conferindo contagens, indicadores, QA registrado e assinaturas dos CSVs.")
     eng = eng_dw()
     with eng.connect() as cx:
+        # Validação do total de registros em cada tabela do DW e staging
         for tabela, esperado in CONTAGENS.items():
             obtido = int(cx.execute(text(f"SELECT COUNT(*) FROM {tabela}")).scalar_one())
             resumo["contagens"][tabela] = obtido
@@ -151,6 +158,7 @@ def auditar(desde_id):
                 raise ValueError(f"{tabela}: {obtido} registros, esperado {esperado}")
             ok(f"{tabela}: {obtido:,} registros")
 
+        # Verificação de consistência relacional e chaves estrangeiras nulas
         if cx.execute(text("SELECT COUNT(*) FROM dw.fato_pedido WHERE cliente_sk IS NULL")).scalar_one():
             raise ValueError("Existem pedidos sem cliente_sk")
         for tabela in ('dw.fato_atendimento', 'dw.fato_avaliacao'):
@@ -159,6 +167,8 @@ def auditar(desde_id):
                 raise ValueError(f"{tabela}: {sem_pedido} registros sem pedido_sk")
         resumo["indicadores"]["sac_sem_pedido"] = 0
         resumo["indicadores"]["avaliacoes_sem_pedido"] = 0
+        
+        # Validação de métricas nas ABTs criadas
         for tabela in ('abt.recompra_90d', 'abt.recompra_90d_vazamento'):
             stats = cx.execute(text(f"""
                 SELECT COUNT(DISTINCT cliente_sk) AS clientes,
@@ -168,6 +178,8 @@ def auditar(desde_id):
             if int(stats['clientes']) != 108064 or int(stats['positivos']) != 24043:
                 raise ValueError(f"{tabela}: IDs únicos ou taxa de recompra divergentes")
             resumo["indicadores"][f"{tabela}_positivos"] = int(stats['positivos'])
+            
+        # Verificação contra vazamento temporal na ABT correta
         negativos = int(cx.execute(text("""
             SELECT COUNT(*) FROM abt.recompra_90d WHERE recencia_dias < 0
         """)).scalar_one())
@@ -175,6 +187,7 @@ def auditar(desde_id):
             raise ValueError(f"ABT correta: {negativos} recências negativas (vazamento temporal?)")
         resumo["indicadores"]["recencias_negativas_abt_correta"] = 0
 
+        # Checagem das asserções de qualidade registradas no banco após o ID inicial
         linhas_qa = cx.execute(text("""
             SELECT etapa, nome, aprovado, id
             FROM qa.execucao_assercao
@@ -193,6 +206,7 @@ def auditar(desde_id):
             resumo["qa"][etapa] = quantidade
             ok(f"QA {etapa}: {quantidade} asserções aprovadas")
 
+    # Processamento e exportação do resumo da auditoria em formato JSON
     saida = Path(DIR_SAIDA)
     anterior = None
     for arquivo, origem in CSV_ARQUIVOS.items():
@@ -207,6 +221,7 @@ def auditar(desde_id):
     return resumo
 
 
+# Bloco de execução principal via linha de comando
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--desde-id', required=True, type=int, help='Último ID de QA anterior à reexecução')
