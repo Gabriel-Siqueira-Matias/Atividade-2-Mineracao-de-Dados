@@ -2,7 +2,7 @@
   "contagens": {
     "abt.recompra_90d": 108064,
     "abt.recompra_90d_vazamento": 108064,
-    "dw.dim_canal": 3,
+    "dw.dim_canal": 6,
     "dw.dim_cliente": 115674,
     "dw.dim_produto": 15000,
     "dw.dim_status": 9,

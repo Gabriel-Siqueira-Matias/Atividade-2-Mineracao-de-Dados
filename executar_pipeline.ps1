@@ -18,7 +18,7 @@ Arquivos de auditoria:
 #>
 
 
-# Parâmetro único: a presença da flag autoriza a reconstrução destrutiva.
+# Parâmetro: a presença da flag autoriza a reconstrução destrutiva
 param(
     [switch]$ReconstruirDoZero
 )
@@ -50,7 +50,7 @@ foreach ($arquivo in @(
 }
 
 
-# Localiza especificamente o executável Docker para Windows.
+# Localiza especificamente o executável Docker para Windows
 $comandoDocker = Get-Command docker.exe -CommandType Application -ErrorAction SilentlyContinue
 if (-not $comandoDocker) {
     throw 'Docker Desktop nao encontrado no PATH.'
@@ -74,7 +74,7 @@ $log = Join-Path $pastaExecucao "execucao-$instante.log"
 $cronometroTotal = [Diagnostics.Stopwatch]::StartNew()
 
 
-# Salva cada linha em UTF-8 e a exibe no terminal
+# Salva no log cada linha em UTF-8 e a exibe no terminal
 function GravarLinha([string]$linha) {
     [System.IO.File]::AppendAllText($script:log, $linha + [Environment]::NewLine, $script:utf8SemBOM)
     Write-Output $linha
@@ -101,7 +101,7 @@ function ExecutarDocker([string[]]$argumentos) {
 
 # Erros em qualquer etapa seguem para o bloco catch e encerram com código 1
 try {
-    # A reconstrução destrutiva ocorre somente quando a flag é informada
+    # Execução com parâmetro: reconstrução total, ocorre somente quando a flag é informada
     if ($ReconstruirDoZero) {
         GravarLinha '[ATENCAO] RECONSTRUCAO DO ZERO AUTORIZADA: volumes Docker, ./dados e ./saida serao excluidos.'
         GravarLinha '[INFO] Mantenha backup externo do DW, do dump SQL e dos CSVs, caso necessite preserva-los.'
@@ -118,18 +118,18 @@ try {
             New-Item -ItemType Directory -Path $caminho -Force | Out-Null
         }
         GravarLinha '[DOCKER] Recriando imagens, fontes e bancos de dados...'
-        # Recria os serviços. O Compose aguarda o término bem-sucedido do seed
+        # Recria os serviços, o Compose aguarda o término bem-sucedido do seed
         ExecutarDocker @('compose', 'up', '-d', '--build')
-        GravarLinha '[DOCKER] Ambiente reconstruido; iniciando as seis etapas do professor.'
-    # Reexecução comum: preserva volumes e diretórios existentes
+        GravarLinha '[DOCKER] Ambiente reconstruido, iniciando as seis etapas.'
+    # Execução comum: só executa as estapas, preserva volumes e diretórios existentes
     } else {
-        GravarLinha '[INICIO] Auditoria de reexecucao do pipeline, SEM apagar volumes'
+        GravarLinha '[INICIO] Auditoria de execucao do pipeline, sem apagar volumes'
     }
 
     # Registra o estado dos serviços no log
     ExecutarDocker @('compose', 'ps')
 
-    # Memoriza o último ID de QA antes da execução, para auditar apenas asserções novas.
+    # Memoriza o último ID de QA antes da execução, para auditar apenas asserções novas
     $consultaQa = "from config import eng_dw; from sqlalchemy import text; e=eng_dw(); c=e.connect(); print(c.execute(text('SELECT COALESCE(MAX(id),0) FROM qa.execucao_assercao')).scalar_one()); c.close()"
     $preferenciaAnterior = $ErrorActionPreference
     try {
@@ -155,7 +155,7 @@ try {
         @{Nome = '04 ABT vazamento';    Args = @('compose','exec','-T','etl','python','-u','04_abt.py','--vazamento')},
         @{Nome = '05 Exportar Orange';  Args = @('compose','exec','-T','etl','python','-u','05_exportar_orange.py')}
     )
-    # Executa cada etapa na ordem do professor
+    # Executa cada etapa na ordem
     foreach ($etapa in $etapas) {
         GravarLinha "`n>>> EXECUTANDO: $($etapa.Nome)"
         # Inicia o cronômetro desta etapa
@@ -183,9 +183,10 @@ try {
     $referenciaPath = Join-Path $pastaValidacao 'referencia_pipeline.json'
     # Se a referência não existe, a primeira execução torna-se a referência
     if (-not (Test-Path -LiteralPath $referenciaPath)) {
-        # Copia o resultado atual como referência; execuções futuras não a substituem
+        # Copia o resultado atual como referência, execuções futuras não a substituem
         Copy-Item -LiteralPath $atualPath -Destination $referenciaPath
         GravarLinha '[REFERENCIA] Primeira execucao auditada. Referencia registrada.'
+
     # Havendo referência, compara os hashes de conteúdo das duas ABTs
     } else {
         # Lê as assinaturas esperadas
@@ -196,7 +197,7 @@ try {
             $depois = $atual.csv.$arquivo.sha256_ordenado_cliente_sk
             # Qualquer divergência indica resultado diferente da referência
             if ($antes -ne $depois) {
-                throw "HASH DIFERENTE: $arquivo. Investigue antes de entregar."
+                throw "HASH DIFERENTE: $arquivo. Necessário investigar."
             }
             GravarLinha "[OK] CSV IDENTICO A REFERENCIA: $arquivo"
         }
@@ -204,7 +205,7 @@ try {
 
     # Finaliza e registra o tempo total
     $cronometroTotal.Stop()
-    GravarLinha ("[SUCESSO] Pipeline reexecutado e auditado em {0:N1}s" -f $cronometroTotal.Elapsed.TotalSeconds)
+    GravarLinha ("[SUCESSO] Pipeline executado e auditado em {0:N1}s" -f $cronometroTotal.Elapsed.TotalSeconds)
     GravarLinha "[LOG] $log"
     exit 0
 # Em caso de erro, grava a falha no log persistente e retorna exit code 1

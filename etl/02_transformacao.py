@@ -328,6 +328,37 @@ def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
     return pedidos
 
 
+# ---------------------------------------------------------------------------
+# Função para relacionar cada pedido ao canal de venda da sua origem
+# ---------------------------------------------------------------------------
+def atribui_canal_pedido(pedidos, dim_canal_db, sistema):
+    """Localiza canal_sk por sistema + canal de origem, sem escolher um ID arbitrário."""
+    # Normaliza apenas a chave de comparação: o staging preserva o valor original.
+    canais = dim_canal_db.loc[
+        dim_canal_db['sistema'] == sistema, ['canal_sk', 'canal_origem']
+    ].copy()
+    canais['canal_chave'] = canais['canal_origem'].astype('string').str.strip().str.upper()
+    if canais['canal_chave'].isna().any() or canais['canal_chave'].eq('').any():
+        raise ValueError(f"{sistema}: canal vazio cadastrado em dw.dim_canal")
+    if canais['canal_chave'].duplicated().any():
+        raise ValueError(f"{sistema}: canais duplicados em dw.dim_canal")
+
+    pedidos = pedidos.copy()
+    pedidos['canal_chave'] = pedidos['canal_origem'].astype('string').str.strip().str.upper()
+    if pedidos['canal_chave'].isna().any() or pedidos['canal_chave'].eq('').any():
+        raise ValueError(f"{sistema}: há pedidos com canal de origem ausente")
+
+    # many_to_one impede que a dimensão multiplique a quantidade de pedidos.
+    pedidos = pedidos.merge(
+        canais[['canal_chave', 'canal_sk']],
+        on='canal_chave', how='left', validate='many_to_one'
+    )
+    if pedidos['canal_sk'].isna().any():
+        desconhecidos = pedidos.loc[pedidos['canal_sk'].isna(), 'canal_origem'].unique().tolist()
+        raise ValueError(f"{sistema}: canais não mapeados: {desconhecidos}")
+    return pedidos.drop(columns=['canal_chave'])
+
+
 # ===========================================================================
 # DECISÃO 3 — SEMÂNTICA DOS VALORES MONETÁRIOS
 # ===========================================================================
@@ -338,7 +369,7 @@ def conforma_valores(qa):
     """
     eng = eng_dw()
 
-    # Monta dimensões de apoio e carrega os pedidos consolidados de ambas as origens.
+        # Monta dimensões de apoio e carrega os pedidos consolidados de ambas as origens.
     # Gera a dimensão de tempo a partir das datas de pedidos e entregas.
     datas_leg = pd.read_sql('SELECT "DT_PEDIDO" as dt FROM stg.legado_pedidos UNION SELECT "DT_ENTREGA" as dt FROM stg.legado_pedidos', eng)
     datas_eco = pd.read_sql("SELECT placed_at as dt FROM stg.ecommerce_orders UNION SELECT delivered_at as dt FROM stg.ecommerce_orders", eng)
@@ -361,15 +392,22 @@ def conforma_valores(qa):
         conn.execute(text("TRUNCATE TABLE dw.dim_tempo CASCADE;"))
     df_tempo.to_sql('dim_tempo', eng, schema='dw', if_exists='append', index=False)
 
+    # Mantém os seis canais reais: três do legado e três do e-commerce.
+    # Os valores originais ficam em canal_origem; a categoria analítica é conformada.
+    # SITE e web/app são vendas online próprias, mas continuam em linhas distintas.
+
     # Padroniza os canais de venda antes de relacioná-los aos pedidos.
     canais_data = [
-        {'canal_origem': 'LOJA_FISICA', 'canal_conformado': 'FISICO', 'sistema': 'LEGADO'},
-        {'canal_origem': 'WEBSITE', 'canal_conformado': 'ONLINE_PROPRIO', 'sistema': 'ECOM'},
-        {'canal_origem': 'MARKETPLACE', 'canal_conformado': 'MARKETPLACE', 'sistema': 'ECOM'}
+        {'canal_origem': 'LOJA', 'canal_conformado': 'LOJA_FISICA', 'sistema': 'LEGADO'},
+        {'canal_origem': 'SITE', 'canal_conformado': 'SITE', 'sistema': 'LEGADO'},
+        {'canal_origem': 'TELEVENDAS', 'canal_conformado': 'TELEVENDAS', 'sistema': 'LEGADO'},
+        {'canal_origem': 'web', 'canal_conformado': 'SITE', 'sistema': 'ECOM'},
+        {'canal_origem': 'app', 'canal_conformado': 'APLICATIVO', 'sistema': 'ECOM'},
+        {'canal_origem': 'marketplace', 'canal_conformado': 'MARKETPLACE', 'sistema': 'ECOM'}
     ]
     dim_canal = pd.DataFrame(canais_data)
     with eng.begin() as conn:
-        conn.execute(text("TRUNCATE TABLE dw.dim_canal CASCADE;"))
+        conn.execute(text("TRUNCATE TABLE dw.dim_canal RESTART IDENTITY CASCADE;"))
     dim_canal.to_sql('dim_canal', eng, schema='dw', if_exists='append', index=False)
 
     # Obtém as chaves das dimensões necessárias para construir a fato.
@@ -378,17 +416,26 @@ def conforma_valores(qa):
     dim_cliente['id_ecommerce'] = dim_cliente['id_ecommerce'].astype('Int64')
 
     dim_status = pd.read_sql("SELECT status_sk, status_origem, sistema FROM dw.dim_status", eng)
-    dim_canal_db = pd.read_sql("SELECT canal_sk, sistema FROM dw.dim_canal", eng)
+    dim_canal_db = pd.read_sql("SELECT canal_sk, canal_origem, sistema FROM dw.dim_canal", eng)
 
     # ERP legado: pedidos, agregados financeiros e cliente de origem.
-    ped_leg = pd.read_sql('SELECT "ID_PEDIDO" as id_pedido, "ID_CLIENTE" as id_cliente, "STATUS" as status_origem, "VALOR_FRETE" as valor_frete, "DT_PEDIDO" as dt_pedido, "DT_ENTREGA" as dt_entrega FROM stg.legado_pedidos', eng)
+    ped_leg = pd.read_sql("""
+        SELECT
+            "ID_PEDIDO" as id_pedido,
+            "ID_CLIENTE" as id_cliente,
+            "STATUS" as status_origem,
+            "VALOR_FRETE" as valor_frete,
+            "DT_PEDIDO" as dt_pedido,
+            "DT_ENTREGA" as dt_entrega,
+            "CANAL" as canal_origem
+        FROM stg.legado_pedidos
+    """, eng)
     # Agrega quantidades e valores dos itens do staging diretamente no PostgreSQL.
     # Soma os itens no próprio banco; desconto negativo do legado vira zero
     # na medida analítica, mas o valor bruto permanece no staging.
     inicio_itens = perf_counter()
     agg_leg = pd.read_sql("""
-        SELECT
-            "ID_PEDIDO" AS id_pedido,
+        SELECT "ID_PEDIDO" AS id_pedido,
             COALESCE(SUM("QTD"::numeric * "VL_UNITARIO"::numeric), 0) AS valor_mercadoria,
             COALESCE(SUM(CASE WHEN "VL_DESCONTO"::numeric < 0 THEN 0
                 ELSE "VL_DESCONTO"::numeric END), 0) AS vl_desconto,
@@ -411,7 +458,17 @@ def conforma_valores(qa):
     ped_leg = ped_leg.merge(dim_cliente[dim_cliente['id_legado'].notna()], left_on='id_cliente_origem', right_on='id_legado', how='left', validate='many_to_one')
 
     # E-commerce: pedidos, agregados financeiros e cliente de origem.
-    ped_eco = pd.read_sql("SELECT order_id, customer_id, status as status_origem, freight_amount, placed_at, delivered_at FROM stg.ecommerce_orders", eng)
+    ped_eco = pd.read_sql("""
+        SELECT
+            order_id,
+            customer_id,
+            status as status_origem,
+            freight_amount,
+            placed_at,
+            delivered_at,
+            channel as canal_origem
+        FROM stg.ecommerce_orders
+    """, eng)
     # Agrega itens do e-commerce com sua regra de desconto, sem repetir o frete.
     inicio_itens = perf_counter()
     agg_eco = pd.read_sql("""
@@ -460,11 +517,10 @@ def conforma_valores(qa):
     ped_eco['data_pedido_sk'] = pd.to_datetime(ped_eco['placed_at']).dt.date
     ped_eco['data_entrega_sk'] = pd.to_datetime(ped_eco['delivered_at']).dt.date
 
-    # Associa as chaves substitutas dos canais de venda aos pedidos.
-    canal_leg_sk = dim_canal_db[dim_canal_db['sistema'] == 'LEGADO']['canal_sk'].iloc[0]
-    canal_eco_sk = dim_canal_db[dim_canal_db['sistema'] == 'ECOM']['canal_sk'].iloc[0]
-    ped_leg['canal_sk'] = canal_leg_sk
-    ped_eco['canal_sk'] = canal_eco_sk
+    # Cada pedido recebe o canal_sk do seu PRÓPRIO canal (sistema + canal_origem).
+    # Uma categoria desconhecida interrompe a carga em vez de associar o 1º canal.
+    ped_leg = atribui_canal_pedido(ped_leg, dim_canal_db, 'LEGADO')
+    ped_eco = atribui_canal_pedido(ped_eco, dim_canal_db, 'ECOM')
 
     # Une os pedidos de ambas as origens com um identificador de sistema.
     colunas_base = ['id_origem', 'sistema_origem', 'cliente_sk', 'data_pedido_sk', 'data_entrega_sk', 'canal_sk', 'status_origem', 'qtd_itens', 'valor_mercadoria', 'valor_frete', 'valor_desconto', 'valor_total']
@@ -750,7 +806,7 @@ if __name__ == "__main__":
     # Salva as verificações de qualidade no DW e exibe o resultado da etapa.
     qa.registrar(eng_dw())
     if qa.imprimir():
-        print("[AVISO] Há asserções em falha. Isso não impede seguir, mas precisa aparecer no RDT com explicação.")
+        print("[AVISO] Há asserções em falha. Isso não impede seguir.")
     print(f"[tempo] asserções/registro   | {perf_counter()-inicio_qa:.1f}s")
     ok("Etapa 2 concluída.")
     print(f"[tempo] total etapa 2       | {perf_counter()-inicio_total:.1f}s")

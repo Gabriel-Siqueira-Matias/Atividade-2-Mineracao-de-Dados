@@ -197,7 +197,7 @@ def carrega_fato_atendimento(engine):
                     THEN NULL
                 ELSE TO_DATE(s.data_fechamento, 'DD/MM/YYYY')
             END AS data_fechamento_sk,
-            s.canal,
+            UPPER(NULLIF(TRIM(s.canal), '')) AS canal,
             UPPER(TRIM(s.motivo)) AS motivo_conformado,
             CASE WHEN NULLIF(TRIM(s.nota_satisfacao), '')::int BETWEEN 1 AND 5
                 THEN NULLIF(TRIM(s.nota_satisfacao), '')::int
@@ -245,7 +245,7 @@ def carrega_fato_avaliacao(engine):
            OR LEFT(TRIM(submitted_at), 10) !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
     """)).scalar_one()
     if invalidas:
-        raise ValueError(f"{invalidas} avaliações sem data válida; corrija ou documente no RDT")
+        raise ValueError(f"{invalidas} avaliações sem data válida; necessário correção")
     # Relaciona pedidos e produtos, usando LEFT JOIN para não descartar a avaliação.
     # A data_sk utiliza a data escrita no texto, sem conversão uniforme para UTC.
     cx.execute(text("""

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Auditoria SOMENTE LEITURA posterior aos seis comandos do professor.
+"""Auditoria posterior as seis etapas.
 
 Uso (executado automaticamente pelo .ps1):
     python -u auditar_pipeline.py --desde-id 123
@@ -56,7 +56,7 @@ CONTAGENS = {
     "dw.dim_cliente": 115674,
     "dw.dim_produto": 15000,
     "dw.dim_status": 9,
-    "dw.dim_canal": 3,
+    "dw.dim_canal": 6,
     "dw.fato_pedido": 410000,
     "dw.fato_item_pedido": 1371876,
     "dw.fato_atendimento": 95000,
@@ -64,6 +64,7 @@ CONTAGENS = {
     "abt.recompra_90d": 108064,
     "abt.recompra_90d_vazamento": 108064,
 }
+
 
 # Dicionário com a quantidade mínima exigida de asserções de QA aprovadas por etapa
 ETAPAS_QA = {
@@ -73,6 +74,7 @@ ETAPAS_QA = {
     "04_abt_correta": 5,
     "04_abt_vazamento": 4,
 }
+
 
 # Mapeamento dos arquivos CSV exportados para suas respectivas tabelas no banco de dados
 CSV_ARQUIVOS = {
