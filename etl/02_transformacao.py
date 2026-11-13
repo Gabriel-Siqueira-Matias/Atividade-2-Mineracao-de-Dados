@@ -369,29 +369,6 @@ def conforma_valores(qa):
     """
     eng = eng_dw()
 
-        # Monta dimensões de apoio e carrega os pedidos consolidados de ambas as origens.
-    # Gera a dimensão de tempo a partir das datas de pedidos e entregas.
-    datas_leg = pd.read_sql('SELECT "DT_PEDIDO" as dt FROM stg.legado_pedidos UNION SELECT "DT_ENTREGA" as dt FROM stg.legado_pedidos', eng)
-    datas_eco = pd.read_sql("SELECT placed_at as dt FROM stg.ecommerce_orders UNION SELECT delivered_at as dt FROM stg.ecommerce_orders", eng)
-    todas_datas = pd.concat([datas_leg['dt'], datas_eco['dt']]).dropna()
-    todas_datas = pd.to_datetime(todas_datas, utc=True).dt.tz_localize(None).dt.date.unique()
-    
-    # Remove datas anteriores a 2000 e cria atributos calendáricos das demais.
-    df_tempo = pd.DataFrame({'data_sk': todas_datas})
-    df_tempo = df_tempo[df_tempo['data_sk'] >= pd.to_datetime('2000-01-01').date()]
-    dt_s = pd.to_datetime(df_tempo['data_sk'])
-    df_tempo['ano'] = dt_s.dt.year
-    df_tempo['trimestre'] = dt_s.dt.quarter
-    df_tempo['mes'] = dt_s.dt.month
-    df_tempo['dia'] = dt_s.dt.day
-    df_tempo['dia_semana'] = dt_s.dt.dayofweek + 1
-    df_tempo['nome_mes'] = dt_s.dt.strftime('%B')
-    df_tempo['eh_fim_semana'] = dt_s.dt.dayofweek >= 5
-
-    with eng.begin() as conn:
-        conn.execute(text("TRUNCATE TABLE dw.dim_tempo CASCADE;"))
-    df_tempo.to_sql('dim_tempo', eng, schema='dw', if_exists='append', index=False)
-
     # Mantém os seis canais reais: três do legado e três do e-commerce.
     # Os valores originais ficam em canal_origem; a categoria analítica é conformada.
     # SITE e web/app são vendas online próprias, mas continuam em linhas distintas.
@@ -643,52 +620,126 @@ def trata_datas_e_ausencias(qa):
 # ===========================================================================
 def liga_sac_e_avaliacoes(qa):
     """
-    Tenta associar SAC e avaliações aos pedidos, com blocos opcionais.
-    O merge de SAC não é persistido aqui; a carga final ocorre na Etapa 3.
-    Erros são ignorados pelos except e a avaliação pode receber data sintética.
+    Única função responsável por recriar dw.fato_atendimento e
+    dw.fato_avaliacao. Usa os registros originais do staging, vincula os
+    pedidos e preserva NULL onde a fonte não forneceu uma informação.
+    A carga das duas fatos ocorre na mesma transação: erro implica rollback.
     """
     eng = eng_dw()
-    
-    # Se não for possível ler os pedidos do DW, a função retorna sem vínculo.
-    try:
-        fato = pd.read_sql("SELECT sistema_origem, id_origem, pedido_sk FROM dw.fato_pedido", eng)
-    except Exception:
-        return
+    inicio = perf_counter()
 
-    # Tenta relacionar SAC a pedidos na tabela alternativa, sem persistir o merge.
-    # Tenta um pareamento de SAC na tabela opcional, mas não grava o resultado.
-    # A carga efetiva do SAC é realizada em 03_carga_dw.py.
-    try:
-        sac = pd.read_sql("SELECT protocolo, origem_sistema, id_pedido_origem, motivo FROM stg.sac_atendimentos", eng)
-        sac['id_pedido_origem'] = sac['id_pedido_origem'].astype(str)
-        sac_match = sac.merge(fato, left_on=['origem_sistema', 'id_pedido_origem'], right_on=['sistema_origem', 'id_origem'], how='left')
-    except Exception:
-        pass
+    # Faz as cargas completas nesta etapa, sem criar datas sintéticas nem
+    # ignorar exceções. O estágio já possui os dados das duas fontes.
+    with eng.begin() as cx:
+        # O TRUNCATE não usa CASCADE: recria apenas as duas fatos auxiliares.
+        # RESTART IDENTITY evita que as chaves continuem aumentando na recarga.
+        cx.execute(text("""TRUNCATE TABLE dw.fato_atendimento, dw.fato_avaliacao RESTART IDENTITY"""))
 
-    # Tenta relacionar avaliações à fato de pedidos pela referência da avaliação.
-    # Tenta relacionar avaliações por referência de pedido e sistema.
-    # Este bloco é opcional: erros são silenciosamente ignorados.
-    try:
-        aval = pd.read_sql("SELECT review_id, order_ref, rating FROM stg.avaliacoes_marketplace", eng)
-        aval['sistema_origem'] = aval['order_ref'].str.split('-').str[0]
-        aval['sistema_origem'] = aval['sistema_origem'].replace({'LEG': 'LEGADO'})
-        aval['id_origem'] = aval['order_ref']
-        aval_match = aval.merge(fato, on=['sistema_origem', 'id_origem'], how='left')
-        
-        # Na ausência da coluna de data, gera datas sintéticas neste bloco opcional.
-        # Não interpretar essas datas como datas reais das avaliações.
-        if 'data_sk' not in aval_match.columns:
-            aval_match['data_sk'] = pd.date_range(start='2024-01-01', periods=len(aval_match), freq='h').date
+        # SAC: primeira linha por protocolo, ligação pelo sistema e ID do pedido.
+        # Normaliza apenas o canal de atendimento (não o canal de venda).
+        cx.execute(text("""
+            INSERT INTO dw.fato_atendimento (
+                protocolo, cliente_sk, pedido_sk, data_abertura_sk, data_fechamento_sk,
+                canal, motivo_conformado, nota_satisfacao, horas_resolucao
+            )
+            SELECT
+                s.protocolo,
+                p.cliente_sk,
+                p.pedido_sk,
+                TO_DATE(s.data_abertura, 'DD/MM/YYYY') AS data_abertura_sk,
+                CASE
+                    WHEN NULLIF(TRIM(s.data_fechamento), '') IS NULL
+                    OR UPPER(TRIM(s.data_fechamento)) IN ('EM_ABERTO', 'N/A', 'NULL')
+                    THEN NULL
+                    ELSE TO_DATE(s.data_fechamento, 'DD/MM/YYYY')
+                END AS data_fechamento_sk,
+                UPPER(NULLIF(TRIM(s.canal), '')) AS canal,
+                UPPER(TRIM(s.motivo)) AS motivo_conformado,
+                CASE WHEN NULLIF(TRIM(s.nota_satisfacao), '')::int BETWEEN 1 AND 5
+                    THEN NULLIF(TRIM(s.nota_satisfacao), '')::int
+                    ELSE NULL END AS nota_satisfacao,
+                CASE WHEN NULLIF(REPLACE(TRIM(s.tempo_resolucao_horas), ',', '.'), '')::numeric >= 0
+                    THEN NULLIF(REPLACE(TRIM(s.tempo_resolucao_horas), ',', '.'), '')::numeric
+                    ELSE NULL END AS horas_resolucao
+            FROM (
+                -- O CSV contém repetições exatas; protocolo é UNIQUE no esquema DW.
+                SELECT DISTINCT ON (protocolo) *
+                FROM stg.atendimentos_sac
+                ORDER BY protocolo, _linha_origem
+            ) s
+            LEFT JOIN dw.fato_pedido p
+            ON p.sistema_origem = UPPER(TRIM(s.origem_sistema))
+            AND p.id_origem = CASE UPPER(TRIM(s.origem_sistema))
+                WHEN 'LEGADO' THEN 'LEG-' || TRIM(s.id_pedido_origem)
+                WHEN 'ECOM' THEN 'ECOM-' || TRIM(s.id_pedido_origem)
+                ELSE NULL END
+            WHERE TO_DATE(s.data_abertura, 'DD/MM/YYYY') >= DATE '2000-01-01';
+        """))
 
-        # Tenta regravar fato_avaliacao. A etapa 3 fará a carga definitiva
-        # com a data original das avaliações.
-        with eng.begin() as conn:
-            conn.execute(text("TRUNCATE TABLE dw.fato_avaliacao CASCADE;"))
-        
-        aval_final = aval_match[['review_id', 'pedido_sk', 'data_sk', 'rating']].rename(columns={'rating': 'nota'})
-        aval_final.to_sql('fato_avaliacao', eng, schema='dw', if_exists='append', index=False)
-    except Exception:
-        pass
+        esperados_sac = cx.execute(text("SELECT COUNT(DISTINCT protocolo) FROM stg.atendimentos_sac")).scalar_one()
+        carregados_sac = cx.execute(text("SELECT COUNT(*) FROM dw.fato_atendimento")).scalar_one()
+        if esperados_sac != carregados_sac:
+            raise ValueError(f"SAC: {carregados_sac} protocolos inseridos, esperados {esperados_sac}")
+
+        # Avaliações: exige data com formato de data civil identificável.
+        # NÃO inventa data; conserva a data escrita em submitted_at.
+        invalidas = cx.execute(text("""
+            SELECT COUNT(*)
+            FROM stg.avaliacoes_marketplace
+            WHERE submitted_at IS NULL
+            OR LEFT(TRIM(submitted_at), 10) !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+        """)).scalar_one()
+        if invalidas:
+            raise ValueError(f"{invalidas} avaliações sem data válida; corrija a fonte ou documente a decisão no RDT")
+
+        # Avaliações: relaciona pedido e produto, preserva booleanos e nulos.
+        cx.execute(text("""
+            INSERT INTO dw.fato_avaliacao (
+                review_id,
+                pedido_sk,
+                produto_sk,
+                data_sk,
+                nota,
+                compra_verificada,
+                votos_uteis
+            )
+            SELECT
+                a.review_id,
+                p.pedido_sk,
+                COALESCE(pr_eco.produto_sk, pr_leg.produto_sk) AS produto_sk,
+                LEFT(a.submitted_at, 10)::date AS data_sk,
+                NULLIF(TRIM(a.rating), '')::int AS nota,
+                a.verified_purchase::boolean AS compra_verificada,
+                a.helpful_votes::int AS votos_uteis
+            FROM stg.avaliacoes_marketplace a
+            LEFT JOIN dw.fato_pedido p ON p.id_origem = a.order_ref
+            LEFT JOIN dw.dim_produto pr_eco
+            ON pr_eco.origem = 'ECOM'
+            AND a.order_ref LIKE 'ECOM-%'
+            AND pr_eco.sku = a.product_sku
+            LEFT JOIN dw.dim_produto pr_leg
+            ON pr_leg.origem = 'LEGADO'
+            AND a.order_ref LIKE 'LEG-%'
+            AND pr_leg.id_legado = NULLIF(SUBSTRING(a.product_sku FROM '^LEG-([0-9]+)$'), '')::int;
+        """))
+        esperadas_av = cx.execute(text("SELECT COUNT(*) FROM stg.avaliacoes_marketplace")).scalar_one()
+        carregadas_av = cx.execute(text("SELECT COUNT(*) FROM dw.fato_avaliacao")).scalar_one()
+        if esperadas_av != carregadas_av:
+            raise ValueError(f"Avaliações: {carregadas_av} linhas inseridas, esperadas {esperadas_av}")
+
+        # Na execução de referência, todas as linhas possuem pedido.
+        # Detecta perda de vínculo imediatamente, em vez de mascarar o erro.
+        sem_pedido = cx.execute(text("""
+            SELECT
+                (SELECT COUNT(*) FROM dw.fato_atendimento WHERE pedido_sk IS NULL)
+              + (SELECT COUNT(*) FROM dw.fato_avaliacao WHERE pedido_sk IS NULL)
+        """)).scalar_one()
+        if sem_pedido:
+            raise ValueError(f"SAC/avaliações: {sem_pedido} registros sem pedido")
+
+    ok(f"dw.fato_atendimento: {carregados_sac} protocolos únicos")
+    ok(f"dw.fato_avaliacao: {carregadas_av} avaliações")
+    print(f"[tempo] fatos auxiliares | {perf_counter() - inicio:.1f}s")
 
 
 # ---------------------------------------------------------------------------

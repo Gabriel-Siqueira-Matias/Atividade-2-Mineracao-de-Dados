@@ -47,13 +47,9 @@ def ok(mensagem):
 # Função para completar a dimensão de tempo sem apagar datas existentes
 # ---------------------------------------------------------------------------
 def carrega_dim_tempo(engine, ini=date(2022, 12, 1), fim=date(2026, 3, 31)):
-    """
-    Insere datas faltantes do calendário fixado pelo professor,
-    utilizando ON CONFLICT para não duplicar as datas já armazenadas.
-    """
+    """Esta dimensão está pronta — é a única sem decisão a tomar."""
     MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
              "agosto", "setembro", "outubro", "novembro", "dezembro"]
-    # Prepara um calendário completo entre as datas inicial e final informadas.
     linhas = []
     d = ini
     while d <= fim:
@@ -62,19 +58,12 @@ def carrega_dim_tempo(engine, ini=date(2022, 12, 1), fim=date(2026, 3, 31)):
                            nome_mes=MESES[d.month - 1],
                            eh_fim_semana=d.isoweekday() >= 6))
         d += timedelta(days=1)
-    # Transforma as linhas do calendário em um DataFrame para inserção no DW.
     df = pd.DataFrame(linhas)
-    # Insere somente datas ausentes, sem apagar as já existentes (ON CONFLICT).
-    sql = text("""
-        INSERT INTO dw.dim_tempo
-            (data_sk, ano, trimestre, mes, dia, dia_semana, nome_mes, eh_fim_semana)
-        VALUES (:data_sk, :ano, :trimestre, :mes, :dia, :dia_semana,
-                :nome_mes, :eh_fim_semana)
-        ON CONFLICT (data_sk) DO NOTHING
-    """)
-    inseridos = engine.execute(sql, df.to_dict(orient="records")).rowcount
-    ok(f"dw.dim_tempo: {len(df)} datas avaliadas, {inseridos} novas linhas inseridas")
-    return inseridos
+    with engine.begin() as cx:
+        cx.execute(text("TRUNCATE dw.dim_tempo CASCADE"))
+    df.to_sql("dim_tempo", engine, schema="dw", if_exists="append", index=False)
+    print(f"dim_tempo: {len(df)} datas")
+    return len(df)
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +74,7 @@ def carrega_dimensoes(qa):
     # Recriá-las poderia alterar as chaves utilizadas pelos pedidos.
     # Utiliza a conexão da transação para conferir se cada dimensão tem dados.
     cx = qa.conexao
-    for t in ("dim_cliente", "dim_produto", "dim_canal", "dim_status"):
+    for t in ("dim_cliente", "dim_produto", "dim_canal", "dim_status", "dim_tempo"):
         n = cx.execute(text(f"SELECT COUNT(*) FROM dw.{t}")).scalar_one()
         if n == 0:
             raise ValueError(f"A dimensão dw.{t} está vazia. Execute a Etapa 2 primeiro.")
@@ -171,115 +160,6 @@ def carrega_fato_item_pedido(engine, esperados):
 
 
 # ---------------------------------------------------------------------------
-# Função para carregar os atendimentos únicos do SAC
-# ---------------------------------------------------------------------------
-def carrega_fato_atendimento(engine):
-    """
-    Insere um atendimento por protocolo, escolhendo a primeira ocorrência.
-    Vincula o pedido por sistema e ID, e conserva nulos de campos opcionais.
-    """
-    cx = engine
-    # Escolhe a primeira linha de cada protocolo e vincula por sistema+pedido.
-    # Converte datas e números e mantém NULL para ausências reconhecidas.
-    cx.execute(text("""
-        INSERT INTO dw.fato_atendimento (
-            protocolo, cliente_sk, pedido_sk, data_abertura_sk, data_fechamento_sk,
-            canal, motivo_conformado, nota_satisfacao, horas_resolucao
-        )
-        SELECT
-            s.protocolo,
-            p.cliente_sk,    -- A chave do pedido é mais confiável do que parear só pelo CPF.
-            p.pedido_sk,
-            TO_DATE(s.data_abertura, 'DD/MM/YYYY') AS data_abertura_sk,
-            CASE
-                WHEN NULLIF(TRIM(s.data_fechamento), '') IS NULL
-                    OR UPPER(TRIM(s.data_fechamento)) IN ('EM_ABERTO', 'N/A', 'NULL')
-                    THEN NULL
-                ELSE TO_DATE(s.data_fechamento, 'DD/MM/YYYY')
-            END AS data_fechamento_sk,
-            UPPER(NULLIF(TRIM(s.canal), '')) AS canal,
-            UPPER(TRIM(s.motivo)) AS motivo_conformado,
-            CASE WHEN NULLIF(TRIM(s.nota_satisfacao), '')::int BETWEEN 1 AND 5
-                THEN NULLIF(TRIM(s.nota_satisfacao), '')::int
-                ELSE NULL END AS nota_satisfacao,
-            CASE WHEN NULLIF(REPLACE(TRIM(s.tempo_resolucao_horas), ',', '.'), '')::numeric >= 0
-                THEN NULLIF(REPLACE(TRIM(s.tempo_resolucao_horas), ',', '.'), '')::numeric
-                ELSE NULL END AS horas_resolucao
-        FROM (
-            -- O CSV contém repetições exatas; protocolo é UNIQUE no esquema DW.
-            SELECT DISTINCT ON (protocolo) *
-            FROM stg.atendimentos_sac
-            ORDER BY protocolo, _linha_origem
-        ) s
-        LEFT JOIN dw.fato_pedido p
-        ON p.sistema_origem = UPPER(TRIM(s.origem_sistema))
-        AND p.id_origem = CASE UPPER(TRIM(s.origem_sistema))
-            WHEN 'LEGADO' THEN 'LEG-' || TRIM(s.id_pedido_origem)
-            WHEN 'ECOM' THEN 'ECOM-' || TRIM(s.id_pedido_origem)
-            ELSE NULL END
-        WHERE TO_DATE(s.data_abertura, 'DD/MM/YYYY') >= DATE '2000-01-01';
-    """))
-    # Confere a quantidade de protocolos distintos gravados na fato.
-    esperados = cx.execute(text("SELECT COUNT(DISTINCT protocolo) FROM stg.atendimentos_sac")).scalar_one()
-    carregados = cx.execute(text("SELECT COUNT(*) FROM dw.fato_atendimento")).scalar_one()
-    if esperados != carregados:
-        raise ValueError(f"SAC: {carregados} protocolos inseridos, esperados {esperados}")
-    ok(f"dw.fato_atendimento: {carregados} protocolos únicos.")
-
-
-# ---------------------------------------------------------------------------
-# Função para carregar avaliações do marketplace com a data da origem
-# ---------------------------------------------------------------------------
-def carrega_fato_avaliacao(engine):
-    """
-    Carrega avaliações do marketplace com a data escrita em submitted_at.
-    Valida o formato inicial da data, sem converter todos os fusos para UTC.
-    """
-    cx = engine
-    # data_sk não pode ser NULL; verifica entradas antes de inserir avaliações.
-    # Confere presença e formato básico AAAA-MM-DD do começo de submitted_at.
-    # O cast posterior para date ainda pode rejeitar datas impossíveis.
-    invalidas = cx.execute(text("""
-        SELECT COUNT(*) FROM stg.avaliacoes_marketplace
-        WHERE submitted_at IS NULL
-           OR LEFT(TRIM(submitted_at), 10) !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-    """)).scalar_one()
-    if invalidas:
-        raise ValueError(f"{invalidas} avaliações sem data válida; necessário correção")
-    # Relaciona pedidos e produtos, usando LEFT JOIN para não descartar a avaliação.
-    # A data_sk utiliza a data escrita no texto, sem conversão uniforme para UTC.
-    cx.execute(text("""
-        INSERT INTO dw.fato_avaliacao (
-            review_id, pedido_sk, produto_sk, data_sk, nota, compra_verificada, votos_uteis
-        )
-        SELECT
-            a.review_id,
-            p.pedido_sk,
-            COALESCE(pr_eco.produto_sk, pr_leg.produto_sk) AS produto_sk,
-            LEFT(a.submitted_at, 10)::date AS data_sk,
-            NULLIF(TRIM(a.rating), '')::int AS nota,
-            a.verified_purchase::boolean AS compra_verificada,
-            a.helpful_votes::int AS votos_uteis
-        FROM stg.avaliacoes_marketplace a
-        LEFT JOIN dw.fato_pedido p ON p.id_origem = a.order_ref
-        LEFT JOIN dw.dim_produto pr_eco
-        ON pr_eco.origem = 'ECOM'
-        AND a.order_ref LIKE 'ECOM-%'
-        AND pr_eco.sku = a.product_sku
-        LEFT JOIN dw.dim_produto pr_leg
-        ON pr_leg.origem = 'LEGADO'
-        AND a.order_ref LIKE 'LEG-%'
-        AND pr_leg.id_legado = NULLIF(SUBSTRING(a.product_sku FROM '^LEG-([0-9]+)$'), '')::int;
-    """))
-    # Compara quantidade de avaliações da origem com a fato carregada.
-    esperados = cx.execute(text("SELECT COUNT(*) FROM stg.avaliacoes_marketplace")).scalar_one()
-    carregados = cx.execute(text("SELECT COUNT(*) FROM dw.fato_avaliacao")).scalar_one()
-    if esperados != carregados:
-        raise ValueError(f"Avaliações: {carregados} inseridas, esperadas {esperados}")
-    ok(f"dw.fato_avaliacao: {carregados} avaliações.")
-
-
-# ---------------------------------------------------------------------------
 # Função para calcular a quantidade de itens elegíveis para a carga
 # ---------------------------------------------------------------------------
 def carrega_fato_item(qa):
@@ -302,20 +182,6 @@ def carrega_fato_item(qa):
         esperados += total - orfaos
         info(f"Itens órfãos ({sistema}) mantidos no staging: {orfaos}")
     carrega_fato_item_pedido(cx, esperados)
-
-
-# ---------------------------------------------------------------------------
-# Função para carregar as fatos auxiliares na transação da Etapa 3
-# ---------------------------------------------------------------------------
-def carrega_fatos_auxiliares(qa):
-    # Mantém SAC e avaliações na mesma transação dos itens; erro causa rollback.
-    cx = qa.conexao
-    t0 = perf_counter()
-    carrega_fato_atendimento(cx)
-    print(f"[tempo] fato_atendimento   | {perf_counter() - t0:.1f}s", flush=True)
-    t0 = perf_counter()
-    carrega_fato_avaliacao(cx)
-    print(f"[tempo] fato_avaliacao     | {perf_counter() - t0:.1f}s", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -382,33 +248,28 @@ def conferir_carga_gravada(engine):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     secao("ETAPA 3 — CARGA NO ESQUEMA ESTRELA")
-    info("Recarregando apenas as fatos auxiliares e conferindo a consistência final do DW.")
+    info("Recarregando itens e conferindo o DW; SAC, avaliações e dim_tempo vêm da Etapa 2.")
     # Obtém o engine do DW e cria a suíte de asserções da carga.
     dw = eng_dw()
     qa = Suite(etapa="03_carga_dw")
     inicio = perf_counter()
-    # Abre uma transação para recarregar as três fatos auxiliares de forma atômica.
+    # Transação única para recarregar os itens e executar as verificações.
     with dw.begin() as cx:
         qa.conexao = cx
-        # Atualiza o calendário e confirma as dimensões e os pedidos já existentes.
-        carrega_dim_tempo(cx)
+        # Confere dimensões (inclusive a dim_tempo criada na Etapa 2).
+        # Chamar carrega_dim_tempo aqui apagaria os pedidos por TRUNCATE CASCADE.
         carrega_dimensoes(qa)
         carrega_fato_pedido(qa)
 
-        # Limpa apenas fatos de itens, SAC e avaliações; preserva pedidos e dimensões.
+        # Recarrega apenas fato_item_pedido; não toca nas fatos auxiliares.
         t0 = perf_counter()
-        cx.execute(text("""
-            TRUNCATE TABLE dw.fato_item_pedido, dw.fato_atendimento, dw.fato_avaliacao RESTART IDENTITY
-        """))
+        cx.execute(text("""TRUNCATE TABLE dw.fato_item_pedido RESTART IDENTITY"""))
         print(f"[tempo] preparação fatos   | {perf_counter() - t0:.1f}s", flush=True)
         t0 = perf_counter()
         # Insere somente itens com vínculo válido de pedido e produto.
         carrega_fato_item(qa)
         print(f"[tempo] carga de itens     | {perf_counter() - t0:.1f}s", flush=True)
         t0 = perf_counter()
-        # Carrega SAC e avaliações na mesma transação dos itens.
-        carrega_fatos_auxiliares(qa)
-        print(f"[tempo] fatos auxiliares   | {perf_counter() - t0:.1f}s", flush=True)
 
         t0 = perf_counter()
         # Executa quatro asserções de qualidade da carga:
@@ -482,5 +343,5 @@ if __name__ == "__main__":
     t0 = perf_counter()
     conferir_carga_gravada(dw)
     print(f"[tempo] conferência final  | {perf_counter() - t0:.1f}s", flush=True)
-    ok("Etapa 3 concluída: recarga, QA e conferência final realizados.")
+    ok("Etapa 3 concluída: itens recarregados, QA e conferência final realizados.")
     print(f"[tempo] total etapa 3      | {perf_counter() - inicio:.1f}s", flush=True)
