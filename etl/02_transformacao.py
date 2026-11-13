@@ -26,6 +26,7 @@ import pandas as pd
 from config import eng_dw
 from sqlalchemy import text
 from time import perf_counter
+from importlib import import_module
 from qualidade.assercoes import Suite
 
 
@@ -743,7 +744,10 @@ if __name__ == "__main__":
     
     qa = Suite(etapa="02_transformacao")
     inicio_total = perf_counter()
-    
+
+    # Gera e grava as datas utilizadas como chaves estrangeiras nas tabelas fato.
+    import_module("03_carga_dw").carrega_dim_tempo(eng_dw())
+
     # Tupla contendo a sequência de execução das transformações e conformações
     etapas = (
         ("Unificação de clientes", unifica_clientes),
