@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ETAPA 4 — TABELA-BASE DE ANÁLISE (ABT) E EXPERIMENTO DE VAZAMENTO
+ETAPA 4 — TABELA-BASE DE ANÁLISE (ABT) E EXPERIMENTO DE VAZAMENTO (Analytics Layer)
 
-Objetivo: prever se um cliente com histórico até 30/06/2025 realizará
-uma nova compra não cancelada entre 01/07/2025 e 28/09/2025.
+Objetivo:
+    Construir a Tabela-Base de Análise (ABT) para prever se um cliente com histórico
+    de pedidos até a data de corte (30/06/2025) realizará uma nova compra válida
+    (não cancelada) na janela futura de 90 dias (entre 01/07/2025 e 28/09/2025).
 
-O script gera duas versões com a mesma população e o mesmo alvo:
-  · --correta: calcula 15 atributos com registros limitados à data de corte;
-  · --vazamento: substitui recência e frequência por valores que consideram
-    pedidos posteriores ao corte e normaliza valor_monetario com média e
-    desvio de todos os clientes, antes de dividir treino e teste.
+Política de Construção e Variantes do Experimento:
+  · Ambas as versões compartilham exatamente a mesma população elegível e o mesmo rótulo alvo;
+  · Modo --correta (RDT-14): calcula 15 atributos preditivos utilizando estritamente eventos
+    ocorridos até a data de corte, evitando qualquer contaminação temporal;
+  · Modo --vazamento (RDT-15): introduz deliberadamente vazamento do futuro (data leakage) ao
+    calcular recência e frequência sem filtro de data de corte e ao normalizar o valor monetário
+    via z-score com média e desvio padrão globais antes da divisão entre treino e teste.
 
-Comandos: docker compose exec etl python 04_abt.py --correta
-          docker compose exec etl python 04_abt.py --vazamento
+Comandos de Execução:
+    docker compose exec etl python 04_abt.py --correta
+    docker compose exec etl python 04_abt.py --vazamento
 """
-
 
 import argparse
 import pandas as pd
@@ -26,29 +30,31 @@ from config import DATA_CORTE, DATA_FIM_ALVO, eng_dw
 
 
 # ---------------------------------------------------------------------------
-# Funções auxiliares para formatar as mensagens do experimento ABT
+# Bloco: Funções Auxiliares de Interface e Log no Terminal
 # ---------------------------------------------------------------------------
 def secao(titulo):
-    """Cabeçalho visual para separar blocos da ABT."""
+    """Exibe um cabeçalho visual destacado para separar as fases de construção da ABT no terminal."""
     print("\n" + "=" * 72)
     print(titulo)
     print("=" * 72)
 
 
 def info(mensagem):
-    """Mensagem descritiva padronizada."""
+    """Exibe uma mensagem descritiva informativa padronizada com o prefixo [INFO]."""
     print(f"[INFO] {mensagem}")
 
 
 def ok(mensagem):
-    """Mensagem de sucesso padronizada."""
+    """Exibe uma mensagem de sucesso padronizada com o prefixo [OK]."""
     print(f"[OK] {mensagem}")
 
 
 # ---------------------------------------------------------------------------
-# Alvo: consultar o futuro é permitido para gerar o rótulo, não as features.
-# Usa a população com pedidos até o corte e compras válidas na janela posterior.
+# Bloco: Definição SQL da População Elegível e da Variável Alvo (Recompra em 90 dias)
 # ---------------------------------------------------------------------------
+# A consulta ao período futuro (pós-corte) é estritamente permitida apenas para construir
+# o rótulo supervisionado (alvo_recompra_90d), selecionando na CTE 'base' os clientes com
+# histórico até a data de corte e verificando compras não canceladas na janela alvo.
 SQL_ALVO = f"""
 WITH base AS (
     SELECT DISTINCT c.cliente_sk
@@ -73,11 +79,12 @@ LEFT JOIN compras_na_janela j ON j.cliente_sk = b.cliente_sk
 
 
 # ---------------------------------------------------------------------------
-# Atributos da ABT correta (RDT-14): agregados limitados à data de corte.
-# Uma linha por cliente; médias sem observações suficientes permanecem NULL.
-# Status e categoria refletem o DW atual, que não guarda histórico completo
-# de alterações dessas informações após o corte (limitação documentada).
+# Bloco: Definição SQL dos 15 Atributos Históricos da ABT Correta (RDT-14)
 # ---------------------------------------------------------------------------
+# Extrai e agrega os 15 indicadores analíticos no grão de um registro por cliente,
+# restringindo rigorosamente pedidos, entregas, atendimentos do SAC e avaliações à
+# data de corte (DATA_CORTE). Clientes com menos de 2 compras válidas mantêm NULL
+# em métricas de dispersão/intervalo (intervalo_medio_compras e desvio_valor_pedidos).
 SQL_ATRIBUTOS_CORRETOS = f"""
 WITH pedidos_historicos AS (
     SELECT p.cliente_sk, p.pedido_sk, p.data_pedido_sk, p.data_entrega_sk,
@@ -171,26 +178,30 @@ LEFT JOIN avaliacoes a ON a.cliente_sk = r.cliente_sk
 
 
 # ---------------------------------------------------------------------------
-# Função para conferir a recência e frequência da ABT correta por amostragem
+# Bloco: Verificação de Integridade Temporal por Amostragem Determinística
 # ---------------------------------------------------------------------------
 def verifica_amostra_corte(dw, abt, qa):
     """
-    Compara recência e frequência de até 100 clientes com consulta histórica
-    independente à fato de pedidos, registrando divergências no QA.
+    Audita a recência e a frequência de uma amostra determinística de até 100 clientes
+    da ABT correta contra uma consulta independente executada diretamente na fato de pedidos,
+    registrando na suíte de QA se houve qualquer vazamento de compras posteriores ao corte.
     """
     from sqlalchemy import bindparam
 
-    # Amostra determinística de até 100 chaves de clientes distribuídas na ABT.
-    # Ordena clientes por chave e seleciona até 100 posições determinísticas.
+    # Ordena o DataFrame da ABT pela chave substituta do cliente e seleciona até 100 registros espaçados
     ordenados = abt.sort_values('cliente_sk')
     passo = max(1, len(ordenados) // 100)
     amostra = ordenados.iloc[::passo].head(100)
+
+    # Caso a amostra esteja vazia, registra falha imediata na asserção de validação temporal
     if amostra.empty:
         qa.igual('amostra temporal sem divergências', 1, 0)
         return
 
-    # Recalcula na fato de pedidos duas métricas usando apenas o histórico.
+    # Extrai a lista de chaves de clientes amostrada para filtrar a consulta de auditoria no banco
     ids = [int(v) for v in amostra['cliente_sk']]
+
+    # Define a consulta SQL independente restrita a DATA_CORTE com expansão dinâmica de parâmetros IN
     stmt = text(f"""
         SELECT p.cliente_sk,
             (DATE '{DATA_CORTE}' - MAX(p.data_pedido_sk) FILTER (
@@ -203,49 +214,63 @@ def verifica_amostra_corte(dw, abt, qa):
         AND p.cliente_sk IN :ids
         GROUP BY p.cliente_sk
     """).bindparams(bindparam('ids', expanding=True))
-    # Compara as métricas extraídas da ABT com as calculadas diretamente do DW.
-    esperado = pd.read_sql(stmt, dw, params={'ids': ids})
-    comparacao = amostra[['cliente_sk', 'recencia_dias', 'frequencia_pedidos']].merge(esperado, on='cliente_sk', how='left', suffixes=('_abt', '_origem'),validate='one_to_one')
+
+    # Executa a consulta de auditoria no Data Warehouse passando o dicionário de IDs amostrados
+    esperado = pd.read_sql(stmt, dw, params={
+        'ids': ids,
+    })
+
+    # Cruza os indicadores da ABT com os valores recalculados na origem garantindo relação 1:1
+    comparacao = amostra[[
+        'cliente_sk',
+        'recencia_dias',
+        'frequencia_pedidos',
+    ]].merge(esperado, on='cliente_sk', how='left', suffixes=('_abt', '_origem'), validate='one_to_one')
+
+    # Converte as colunas comparadas para o tipo inteiro anulável do pandas (Int64)
     rec_abt = comparacao['recencia_dias_abt'].astype('Int64')
     rec_ref = comparacao['recencia_dias_origem'].astype('Int64')
     freq_abt = comparacao['frequencia_pedidos_abt'].astype('Int64')
     freq_ref = comparacao['frequencia_pedidos_origem'].astype('Int64')
-    # Trata recências nulas de modo específico e registra a contagem de diferenças.
+
+    # Contabiliza divergências tratando pares simultaneamente nulos em recência como equivalentes
     divergencias = int((~(rec_abt.eq(rec_ref).fillna(rec_abt.isna() & rec_ref.isna()) & freq_abt.eq(freq_ref).fillna(False))).sum())
-    qa.igual('amostra temporal sem divergências', divergencias, 0, 'Recência e frequência devem ignorar pedidos posteriores a 30/06/2025')
+
+    # Registra na suíte de qualidade a asserção exigindo zero divergências temporais na amostra
+    qa.igual(
+        'amostra temporal sem divergências',
+        divergencias,
+        0,
+        'Recência e frequência devem ignorar pedidos posteriores a 30/06/2025',
+    )
 
 
 # ---------------------------------------------------------------------------
-# Função para obter os 15 atributos históricos da ABT correta
+# Bloco: Extração dos Atributos Preditivos da ABT Correta (Sem Vazamento)
 # ---------------------------------------------------------------------------
 def monta_atributos_corretos(dw):
     """
-    Consulta os 15 atributos preditivos históricos definidos em
-    SQL_ATRIBUTOS_CORRETOS, com pedidos limitados a DATA_CORTE.
-    Médias, intervalos e desvios insuficientes podem permanecer nulos.
-
-    A seleção de status e categoria reflete os valores atuais do DW,
-    pois não há histórico temporal completo dessas dimensões.
+    Executa a consulta SQL_ATRIBUTOS_CORRETOS no Data Warehouse para retornar os
+    15 atributos preditivos calculados exclusivamente com dados até a data de corte.
     """
+    # Executa a leitura SQL no Data Warehouse e retorna o DataFrame com as 15 features históricas
     return pd.read_sql(text(SQL_ATRIBUTOS_CORRETOS), dw)
 
 
 # ---------------------------------------------------------------------------
-# Função para gerar atributos contaminados intencionalmente para comparação
+# Bloco: Construção dos Atributos Contaminados para o Experimento de Vazamento (RDT-15)
 # ---------------------------------------------------------------------------
 def monta_atributos_com_vazamento(dw):
     """
-    Retorna os mesmos atributos com dois vazamentos temporais deliberados:
-    recencia_dias e frequencia_pedidos calculados sem corte de data.
-    Aplica ainda z-score global ao valor_monetario antes da divisão
-    treino/teste; não deve ser usado para previsão real.
+    Constrói a versão experimental contaminada da ABT introduzindo dois vazamentos deliberados:
+    1. Recalcula recência e frequência utilizando toda a tabela fato_pedido sem limite de data;
+    2. Aplica padronização z-score global sobre valor_monetario usando média e desvio de toda a população.
     """
-    # RDT-15: recência e frequência passam a utilizar compras posteriores ao corte.
-    # Outros atributos continuam históricos, exceto valor_monetario normalizado.
-    # Parte da mesma ABT histórica, preservando a população e as outras features.
+    # Obtém inicialmente a base histórica de atributos corretos para preservar população e demais colunas
     atributos = monta_atributos_corretos(dw)
     colunas_originais = list(atributos.columns)
-    # Consulta pedidos de todas as datas, inclusive posteriores a DATA_CORTE.
+
+    # Executa consulta no DW sem filtro de data de corte, incorporando indevidamente pedidos futuros
     dados_futuros = pd.read_sql(text(f"""
         SELECT p.cliente_sk,
             (DATE '{DATA_CORTE}' - MAX(p.data_pedido_sk) FILTER (
@@ -257,79 +282,104 @@ def monta_atributos_com_vazamento(dw):
         -- VAZAMENTO PROPOSITAL: esta consulta NÃO tem filtro por data de corte.
         GROUP BY p.cliente_sk
     """), dw)
-    # Substitui recência e frequência pelas versões que enxergam dados futuros.
-    atributos = atributos.drop(columns=['recencia_dias', 'frequencia_pedidos']).merge(dados_futuros, on='cliente_sk', how='left', validate='one_to_one')
 
-    # Vazamento sutil: z-score ajustado à base inteira antes da partição.
-    # O valor monetário base é histórico; a média e o desvio incluem o teste.
-    # Obtém média e desvio da população toda antes de separar treino e teste.
+    # Remove as colunas históricas de recência e frequência e as substitui pelas versões com vazamento futuro
+    atributos = atributos.drop(columns=[
+        'recencia_dias',
+        'frequencia_pedidos',
+    ]).merge(dados_futuros, on='cliente_sk', how='left', validate='one_to_one')
+
+    # Extrai a série de valor monetário e calcula o desvio padrão populacional (ddof=0) global
     valores = atributos['valor_monetario'].astype(float)
     desvio = valores.std(ddof=0)
-    # Evita divisão por zero na padronização z-score.
+
+    # Valida se o desvio padrão é válido e diferente de zero antes de aplicar a divisão
     if pd.isna(desvio) or desvio == 0:
         raise ValueError('Impossível normalizar valor_monetario: desvio padrão nulo')
-    # Padroniza valor_monetario globalmente e mantém a ordem original das colunas.
+
+    # Aplica normalização z-score global (vazamento de estatísticas do conjunto de teste) e reordena colunas
     atributos['valor_monetario'] = (valores - valores.mean()) / desvio
     return atributos[colunas_originais]
 
 
 # ---------------------------------------------------------------------------
-# Função para gravar no DW a versão selecionada da ABT
+# Bloco: Persistência da Tabela-Base de Análise (ABT) no Esquema Analítico
 # ---------------------------------------------------------------------------
 def grava(df, dw, sufixo):
-    # Escolhe o nome da tabela a partir da opção de execução.
+    """
+    Persiste o DataFrame final da ABT no esquema 'abt' do Data Warehouse,
+    direcionando para a tabela correspondente à variante executada (correta ou vazamento).
+    """
+    # Define o nome da tabela física de destino no esquema 'abt' conforme a flag selecionada
     tabela = "recompra_90d" if sufixo == "correta" else "recompra_90d_vazamento"
-    # Recria a tabela ABT no esquema abt e exibe seu tamanho.
+
+    # Recria a tabela de destino gravando os registros em lotes de 5.000 linhas com inserção múltipla
     df.to_sql(tabela, dw, schema="abt", if_exists="replace", index=False, method="multi", chunksize=5_000)
     ok(f"abt.{tabela}: {len(df)} linhas, {df.shape[1]} colunas")
 
 
 # ---------------------------------------------------------------------------
-# Ponto de entrada da construção das ABTs e das asserções
+# Bloco: Orquestração Principal, Validações de Qualidade (QA) e Gravação da ABT
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Define as opções mutuamente exclusivas de construção da ABT.
+    # Configura o parser de argumentos de linha de comando para seleção da variante da ABT
     ap = argparse.ArgumentParser()
     ap.add_argument("--correta", action="store_true")
     ap.add_argument("--vazamento", action="store_true")
     args = ap.parse_args()
-    # Exige que uma e somente uma versão seja selecionada.
+
+    # Garante que exatamente uma das duas flags (--correta ou --vazamento) foi informada na execução
     if args.correta == args.vazamento:
         ap.error("escolha somente um: --correta ou --vazamento")
 
-    # Abre o cronômetro e lê a população e o alvo calculados pelo SQL_ALVO.
+    # Inicia o cronômetro de execução total e exibe o cabeçalho da Etapa 4 no terminal
     inicio = perf_counter()
     secao("ETAPA 4 — ABT E EXPERIMENTO DE VAZAMENTO")
     info("Gerando a versão correta ou a versão com vazamento conforme a flag informada.")
+
+    # Obtém a conexão com o Data Warehouse de destino e carrega a população base com o rótulo alvo
     dw = eng_dw()
     alvo = pd.read_sql(text(SQL_ALVO), dw)
     info(f"alvo: {len(alvo)} clientes | taxa de recompra = {alvo['alvo_recompra_90d'].mean():.3f}")
 
-    # Cria a suíte de QA específica da variante selecionada.
+    # Inicializa a suíte de asserções de qualidade identificada pelo sufixo da variante em execução
     qa = Suite(etapa="04_abt_" + ("correta" if args.correta else "vazamento"))
-    qa.entre("taxa do alvo", float(alvo["alvo_recompra_90d"].mean()), 0.02, 0.60, "classe extremamente desbalanceada indica erro na janela")
+
+    # Asserção 1: Verifica se a taxa de conversão positiva do alvo está dentro de uma faixa plausível (2% a 60%)
+    qa.entre(
+        "taxa do alvo",
+        float(alvo["alvo_recompra_90d"].mean()),
+        0.02,
+        0.60,
+        "classe extremamente desbalanceada indica erro na janela",
+    )
+
+    # Asserção 2: Garante que cada cliente aparece uma única vez na definição da população-alvo
     qa.unico("cliente_sk no alvo", alvo["cliente_sk"])
 
-    # Escolhe os atributos históricos ou os contaminados intencionalmente.
+    # Constrói o conjunto de atributos preditivos de acordo com o modo selecionado na linha de comando
     atributos = (monta_atributos_corretos(dw) if args.correta else monta_atributos_com_vazamento(dw))
 
-    # Junta alvo e atributos mantendo todos os clientes da população-alvo.
+    # Realiza a junção entre a população-alvo e os atributos mantendo todos os clientes elegíveis
     antes = len(alvo)
     abt = alvo.merge(atributos, on="cliente_sk", how="left")
+
+    # Asserção 3: Confere se a junção com os atributos preservou exatamente a cardinalidade da população-alvo
     qa.cardinalidade_preservada("junção alvo x atributos", antes, len(abt))
+
+    # Asserção 4: Verifica ausência de valores nulos em atributos obrigatórios de clientes com histórico
     qa.sem_nulos("atributos históricos para toda a população", abt['frequencia_pedidos'])
 
-    # Somente a ABT correta recebe a conferência temporal independente.
-    # Confere recência e frequência em amostra determinística da versão correta.
+    # Asserção 5 (exclusiva do modo --correta): Audita amostra de clientes para comprovar ausência de vazamento temporal
     if args.correta:
         verifica_amostra_corte(dw, abt, qa)
 
-    # Imprime o resultado da qualidade e interrompe se houver falha.
+    # Exibe o relatório consolidado de QA no terminal e interrompe a gravação caso alguma asserção tenha falhado
     qa.imprimir()
     if qa.falhou():
         raise RuntimeError('ABT não gravada: uma ou mais asserções falharam')
 
-    # Grava a ABT, registra as asserções e informa a duração.
+    # Persiste a tabela ABT validada no esquema 'abt' e registra o histórico de asserções no banco
     grava(abt, dw, "correta" if args.correta else "vazamento")
     qa.registrar(dw)
     ok("Etapa 4 concluída.")

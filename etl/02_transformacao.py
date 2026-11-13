@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ETAPA 2 — TRANSFORMAÇÃO E CONFORMAÇÃO
+ETAPA 2 — TRANSFORMAÇÃO E CONFORMAÇÃO DE DADOS
 
-Objetivo: converter os dados do staging em dimensões e na fato de pedidos,
-registrando as escolhas semânticas no Registro de Decisões de Transformação (RDT).
+Objetivo:
+    Converter e conformar os dados brutos da camada de staging em dimensões estruturadas 
+    e na tabela fato de pedidos do Data Warehouse (DW), registrando as escolhas 
+    semânticas e regras de negócio.
 
-Principais operações:
-  · unificar clientes por CPF válido e por nome/localidade em relações 1:1;
-  · Deduplicações dos dados;
-  · conformar status e canais dos sistemas de origem;
-  · reconciliar itens, fretes, descontos e valores dos pedidos;
-  · agrupar produtos em categorias analíticas;
-  · tratar datas de entrega inválidas e tentar vínculos auxiliares.
+Principais Operações:
+  · Unificação de clientes por CPF válido ou por nome, cidade e UF normalizados (relações 1:1);
+  · Deduplicação rigorosa de registros cadastrais;
+  · Conformação de status e canais de venda oriundos de sistemas heterogêneos;
+  · Reconciliação e cálculo de itens, fretes, descontos e valores monetários dos pedidos;
+  · Classificação de produtos em taxonomias analíticas padronizadas;
+  · Tratamento de datas de entrega inválidas/sentinelas e vinculação de fontes auxiliares.
 
-Comando: docker compose exec etl python 02_transformacao.py
+Comando de Execução:
+    docker compose exec etl python 02_transformacao.py
 """
 
 import re
@@ -27,34 +30,38 @@ from qualidade.assercoes import Suite
 
 
 # ---------------------------------------------------------------------------
-# Funções auxiliares para formatar mensagens da transformação
+# Funções Auxiliares de Interface e Log no Terminal
 # ---------------------------------------------------------------------------
 def secao(titulo):
-    """Cabeçalho visual para separar etapas da transformação."""
+    """Exibe um cabeçalho visual destacado para separar as fases da transformação."""
     print("\n" + "=" * 72)
     print(titulo)
     print("=" * 72)
 
 
 def info(mensagem):
-    """Mensagem descritiva padronizada."""
+    """Exibe uma mensagem descritiva informativa padronizada com o prefixo [INFO]."""
     print(f"[INFO] {mensagem}")
 
 
 def ok(mensagem):
-    """Mensagem de sucesso padronizada."""
+    """Exibe uma mensagem de sucesso padronizada com o prefixo [OK]."""
     print(f"[OK] {mensagem}")
 
 
 # ---------------------------------------------------------------------------
-# Funções para normalizar identificadores e nomes usados no pareamento
+# Funções de Normalização e Validação Cadastral
 # ---------------------------------------------------------------------------
 def so_digitos(txt):
+    """Remove todos os caracteres não numéricos de uma string (ex: CPF, telefones)."""
     return re.sub(r"\D", "", txt or "")
 
 
 def cpf_valido(cpf):
-    """Valida os dois dígitos verificadores. Retorna None se não tiver 11 dígitos."""
+    """
+    Valida os dois dígitos verificadores do CPF conforme o algoritmo oficial da Receita Federal.
+    Retorna True se for válido, False se for inválido, ou None se não possuir 11 dígitos.
+    """
     c = so_digitos(cpf)
     if len(c) != 11 or len(set(c)) == 1:
         return None if len(c) != 11 else False
@@ -67,38 +74,42 @@ def cpf_valido(cpf):
 
 
 def normaliza_nome(nome):
-    """MAIÚSCULAS sem acento, espaços colapsados. Base para pareamento aproximado."""
+    """
+    Padroniza textos (nomes, cidades, UFs): converte para maiúsculas, remove acentos
+    diacríticos (NFD) e colapsa múltiplos espaços em branco para pareamento aproximado.
+    """
     n = unicodedata.normalize("NFD", (nome or "").strip().upper())
     n = "".join(c for c in n if unicodedata.category(c) != "Mn")
     return re.sub(r"\s+", " ", n)
 
 
-# ===========================================================================
-# DECISÃO 1 — IDENTIDADE DO CLIENTE ENTRE OS DOIS SISTEMAS
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Decisão 1 — Identidade e Unificação de Clientes entre Sistemas
+# ---------------------------------------------------------------------------
 def unifica_clientes(qa):
     """
-    Unifica clientes por CPF validado ou por nome/cidade/UF normalizados.
-    Mantém os registros sem correspondência nas origens exclusivas.
+    Unifica o cadastro de clientes do ERP legado e do e-commerce utilizando duas regras sucessivas:
+    1. Correspondência exata por CPF válido;
+    2. Correspondência exata por nome, cidade e UF normalizados (relacionamentos 1:1).
+    Os registos restantes não pareados são mantidos como clientes exclusivos de cada origem.
     """
-    # Compara os cadastros das duas origens, sem modificar as tabelas de staging.
     eng = eng_dw()
 
-    # Lê o cadastro do ERP legado e converte a data de cadastro.
-    df_leg = pd.read_sql("""
+    # Extrai o cadastro de clientes do ERP legado no staging
+    df_leg = pd.read_sql(text("""
         SELECT
-            "ID_CLIENTE"as id_legado,
+            "ID_CLIENTE" as id_legado,
             "NOME" as nome,
             "CPF" as cpf,
             "CIDADE" as cidade,
             "UF" as uf,
             "DT_CADASTRO" AS data_cadastro
         FROM stg.legado_clientes
-    """, eng)
+    """), eng)
     df_leg["cadastro_data"] = pd.to_datetime(df_leg["data_cadastro"], errors="coerce").dt.date
     
-    # Lê o cadastro do e-commerce e interpreta o instante de criação em UTC.
-    df_eco = pd.read_sql("""
+    # Extrai o cadastro de clientes do e-commerce no staging
+    df_eco = pd.read_sql(text("""
         SELECT
             customer_id as id_ecommerce,
             full_name as nome,
@@ -107,10 +118,10 @@ def unifica_clientes(qa):
             state as uf,
             created_at AS data_cadastro
         FROM stg.ecommerce_customer
-    """, eng)
-    df_eco["cadastro_data"] = pd.to_datetime(df_eco["data_cadastro"],errors="coerce",utc=True).dt.date
+    """), eng)
+    df_eco["cadastro_data"] = pd.to_datetime(df_eco["data_cadastro"], errors="coerce", utc=True).dt.date
 
-    # Cria chaves auxiliares normalizadas, preservando os valores de origem no staging.
+    # Aplica funções de limpeza, validação de CPF e normalização textual em ambos os dataframes
     for df in [df_leg, df_eco]:
         df['cpf_limpo'] = df['cpf'].apply(so_digitos)
         df['cpf_validado'] = df['cpf_limpo'].apply(cpf_valido)
@@ -118,54 +129,46 @@ def unifica_clientes(qa):
         df['cidade_normalizado'] = df['cidade'].apply(normaliza_nome)
         df['uf_normalizado'] = df['uf'].apply(normaliza_nome)
 
-    # Deduplica CPFs válidos dentro de cada origem; no legado mantém o menor ID.
+    # Filtra CPFs válidos e remove duplicatas dentro de cada sistema de origem
     leg_validos = df_leg[df_leg['cpf_validado'] == True].sort_values('id_legado').drop_duplicates('cpf_limpo', keep='first')
     eco_validos = df_eco[df_eco['cpf_validado'] == True].drop_duplicates('cpf_limpo', keep='first')
     
-    # Pareamento 1: vincula cadastros que compartilham CPF válido.
-    # O CPF deve passar pelos dígitos verificadores nas duas fontes.
+    # Pareamento 1: Vincula clientes de ambas as origens que compartilham o mesmo CPF válido
     match_cpf = pd.merge(leg_validos, eco_validos, on='cpf_limpo', suffixes=('_leg', '_eco'))
     match_cpf['origem_unificacao'] = 'AMBOS'
     match_cpf['regra_pareamento'] = 'CPF_VALIDO'
     match_cpf['cpf_normalizado'] = match_cpf['cpf_limpo']
-    # No primeiro pareamento, nome, cidade e UF preferem ECOM quando não são nulos.
-    # fillna não substitui automaticamente texto vazio.
     match_cpf['nome_padronizado'] = match_cpf['nome_normalizado_eco'].fillna(match_cpf['nome_normalizado_leg'])
     match_cpf['cidade'] = match_cpf['cidade_eco'].fillna(match_cpf['cidade_leg'])
     match_cpf['uf'] = match_cpf['uf_eco'].fillna(match_cpf['uf_leg'])
     match_cpf['cpf_validado_col'] = True
 
-    # Separa os cadastros não utilizados na correspondência por CPF.
+    # Identifica IDs já pareados para excluí-los das próximas etapas de cruzamento
     matched_leg_ids = match_cpf['id_legado'].dropna().unique()
     matched_eco_ids = match_cpf['id_ecommerce'].dropna().unique()
     
     leg_sobra = df_leg[~df_leg['id_legado'].isin(matched_leg_ids)]
     eco_sobra = df_eco[~df_eco['id_ecommerce'].isin(matched_eco_ids)]
     
-    # Pareamento 2: nome, cidade e UF normalizados, somente com pares 1:1.
-    # Segundo pareamento: chave textual normalizada; elimina associações
-    # em que um ID apareça mais de uma vez, sem provar identidade por CPF.
+    # Pareamento 2: Vincula cadastros restantes através de nome, cidade e UF normalizados (relações estritas 1:1)
     match_nome = pd.merge(leg_sobra, eco_sobra, on=['nome_normalizado', 'cidade_normalizado', 'uf_normalizado'], suffixes=('_leg', '_eco'))
     match_nome = match_nome.drop_duplicates('id_legado', keep=False).drop_duplicates('id_ecommerce', keep=False)
     match_nome['origem_unificacao'] = 'AMBOS'
     match_nome['regra_pareamento'] = 'NOME_LOCALIDADE'
-    # Nesta regra, o CPF prefere ECOM, mas cidade e UF vêm do legado.
-    # Um CPF válido diferente entre as origens não impede este pareamento.
     match_nome['cpf_normalizado'] = match_nome['cpf_limpo_eco'].fillna(match_nome['cpf_limpo_leg'])
     match_nome['nome_padronizado'] = match_nome['nome_normalizado']
     match_nome['cidade'] = match_nome['cidade_leg']
     match_nome['uf'] = match_nome['uf_leg']
     match_nome['cpf_validado_col'] = match_nome['cpf_validado_eco'].fillna(match_nome['cpf_validado_leg'])
 
-    # Identifica os IDs vinculados pela regra de nome e localidade.
+    # Identifica IDs já pareados para excluí-los das próximas etapas de cruzamento
     matched_nome_leg_ids = match_nome['id_legado'].dropna().unique()
     matched_nome_eco_ids = match_nome['id_ecommerce'].dropna().unique()
 
-    # Preserva em grupos separados quem não teve correspondência inequívoca.
     leg_sobra_final = leg_sobra[~leg_sobra['id_legado'].isin(matched_nome_leg_ids)]
     eco_sobra_final = eco_sobra[~eco_sobra['id_ecommerce'].isin(matched_nome_eco_ids)]
     
-    # Identifica os cadastros exclusivos de cada sistema.
+    # Separa clientes exclusivos do ERP legado (sem correspondência no e-commerce)
     leg_exclusivo = leg_sobra_final.copy()
     leg_exclusivo['id_ecommerce'] = None
     leg_exclusivo['origem_unificacao'] = 'LEGADO'
@@ -176,6 +179,7 @@ def unifica_clientes(qa):
     leg_exclusivo['uf'] = leg_exclusivo['uf']
     leg_exclusivo['cpf_validado_col'] = leg_exclusivo['cpf_validado']
     
+    # Separa clientes exclusivos do e-commerce (sem correspondência no legado)
     eco_exclusivo = eco_sobra_final.copy()
     eco_exclusivo['id_legado'] = None
     eco_exclusivo['origem_unificacao'] = 'ECOM'
@@ -186,19 +190,18 @@ def unifica_clientes(qa):
     eco_exclusivo['uf'] = eco_exclusivo['uf']
     eco_exclusivo['cpf_validado_col'] = eco_exclusivo['cpf_validado']
 
-    # Cálculo da primeira data de cadastro, sem verificação de identidade.
-    # Escolhe a menor data de cadastro disponível para clientes pareados.
+    # Função auxiliar para determinar a primeira data de cadastro entre as fontes unificadas
     def primeira_data(df):
         datas = pd.concat([pd.to_datetime(df["cadastro_data_leg"], errors="coerce"), pd.to_datetime(df["cadastro_data_eco"], errors="coerce")], axis=1)
         return datas.min(axis=1).dt.date
 
+    # Determina a primeira data de cadastro
     match_cpf["dt_primeiro_cadastro"] = primeira_data(match_cpf)
     match_nome["dt_primeiro_cadastro"] = primeira_data(match_nome)
-
     leg_exclusivo["dt_primeiro_cadastro"] = leg_exclusivo["cadastro_data"]
     eco_exclusivo["dt_primeiro_cadastro"] = eco_exclusivo["cadastro_data"]
     
-    # Seleciona as colunas definitivas da dimensão de clientes.
+    # Seleciona e consolida o esquema definitivo da dimensão de clientes
     colunas = [
         "id_legado",
         "id_ecommerce",
@@ -211,44 +214,40 @@ def unifica_clientes(qa):
         "uf",
         "dt_primeiro_cadastro"
     ]
-    # Reúne clientes pareados e exclusivos em uma única dimensão.
     dim_cliente = pd.concat([match_cpf[colunas], match_nome[colunas], leg_exclusivo[colunas], eco_exclusivo[colunas]], ignore_index=True)
     
-    # Converte representações vazias ou nulas de CPF para None.
+    # Normaliza representações de nulos em strings de CPF
     dim_cliente['cpf_normalizado'] = dim_cliente['cpf_normalizado'].astype(str).str.strip()
     dim_cliente.loc[dim_cliente['cpf_normalizado'].isin(['None', 'nan', '', 'nat']), 'cpf_normalizado'] = None
 
-    # Elimina CPFs normalizados repetidos, preferindo os marcados como válidos.
-    # Prioriza CPFs marcados como válidos; entre duplicatas usa a primeira linha.
-    # A unicidade do CPF não garante, isoladamente, identidade real.
+    # Ordena priorizando CPFs válidos e remove duplicatas remanescentes de CPF
     dim_cliente = dim_cliente.sort_values(by='cpf_validado_col', ascending=False)
     com_cpf = dim_cliente[dim_cliente['cpf_normalizado'].notna()].drop_duplicates(subset=['cpf_normalizado'], keep='first')
     sem_cpf = dim_cliente[dim_cliente['cpf_normalizado'].isna()]
     dim_cliente = pd.concat([com_cpf, sem_cpf], ignore_index=True)
 
-    # Gera a chave substituta cliente_sk para os registros que permaneceram.
+    # Gera a chave substituta (surrogate key) 'cliente_sk' para a dimensão
     dim_cliente.reset_index(inplace=True)
     dim_cliente.rename(columns={'index': 'cliente_sk', 'cpf_validado_col': 'cpf_valido'}, inplace=True)
     dim_cliente['cliente_sk'] += 1 
     
-    # Substitui a dimensão e as fatos dependentes com o TRUNCATE CASCADE.
-    # O restante do script recria a fato de pedidos posteriormente.
+    # Realiza carga completa na tabela de destino dw.dim_cliente no DW
     with eng.begin() as conn:
         conn.execute(text("TRUNCATE TABLE dw.dim_cliente CASCADE;"))
     dim_cliente.to_sql('dim_cliente', eng, schema='dw', if_exists='append', index=False)
 
 
-# ===========================================================================
-# DECISÃO 2 — CONFORMAÇÃO DE STATUS
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Decisão 2 — Conformação de Status dos Pedidos
+# ---------------------------------------------------------------------------
 def conforma_status(qa):
     """
-    Mapeia status dos dois sistemas para categorias e motivos comuns.
-    Cada par (sistema, status de origem) recebe uma chave status_sk.
+    Mapeia os códigos de status proprietários dos dois sistemas de origem
+    para um vocabulário analítico padronizado na dimensão dw.dim_status.
     """
     eng = eng_dw()
     
-    # Preserva status original, sistema, categoria comum e motivo de cancelamento.
+    # Dicionário de mapeamento de status de origem para status corporativos conformados
     status_map = [
         {'status_origem': 'ENTREGUE', 'sistema': 'LEGADO', 'status_conformado': 'CONCLUIDO', 'motivo_cancelamento': None},
         {'status_origem': 'CANCELADO', 'sistema': 'LEGADO', 'status_conformado': 'CANCELADO', 'motivo_cancelamento': 'NAO_INFORMADO'},
@@ -260,28 +259,29 @@ def conforma_status(qa):
         {'status_origem': 'shipped', 'sistema': 'ECOM', 'status_conformado': 'EM_ANDAMENTO', 'motivo_cancelamento': None},
         {'status_origem': 'processing', 'sistema': 'ECOM', 'status_conformado': 'EM_PROCESSAMENTO', 'motivo_cancelamento': None}
     ]
-    # Constrói uma dimensão por par (sistema, status), com motivo detalhado.
+    # Cria um dataframe da lista status_map
     dim_status = pd.DataFrame(status_map)
+
+    # Gera a chave substituta (surrogate key) 'status_sk' para a dimensão
     dim_status.reset_index(inplace=True)
     dim_status.rename(columns={'index': 'status_sk'}, inplace=True)
     dim_status['status_sk'] += 1
     
-    # Atualiza a dimensão de status de acordo com os nove mapeamentos.
+    # Substitui e persiste a dimensão de status no DW
     with eng.begin() as conn:
         conn.execute(text("TRUNCATE TABLE dw.dim_status CASCADE;"))
     dim_status.to_sql('dim_status', eng, schema='dw', if_exists='append', index=False)
 
 
 # ---------------------------------------------------------------------------
-# Função para recuperar vínculos de pedidos após deduplicar clientes (RDT-12)
+# Função Auxiliar — Recuperação de Vínculos de Clientes por CPF (RDT-12)
 # ---------------------------------------------------------------------------
 def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
     """
-    Recupera SKs cujos IDs da origem foram perdidos na deduplicação.
-    Só utiliza CPF com 11 dígitos e correspondência ÚNICA na dimensão.
-    Se restar pedido sem vínculo, interrompe em vez de associar a outro cliente.
+    Recupera chaves substitutas de clientes cujos IDs originais foram alterados
+    ou perdidos durante o processo de deduplicação e unificação cadastral.
+    Exige CPF estritamente válido com 11 dígitos e correspondência única na dimensão.
     """
-    # Identifica pedidos ainda sem cliente associado por ID de origem.
     antes = len(pedidos)
     pendentes = pedidos["cliente_sk"].isna()
     n_pendentes = int(pendentes.sum())
@@ -289,18 +289,16 @@ def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
         ok(f"{sistema}: todos os pedidos vinculados pelo ID original")
         return pedidos
 
-    # Impede o uso de um cadastro com IDs de origem nulos ou repetidos.
+    # Valida integridade básica da tabela de cadastro de origem
     if cadastro["id_cliente_origem"].isna().any() or cadastro["id_cliente_origem"].duplicated().any():
         raise ValueError(f"{sistema}: IDs de clientes nulos/duplicados no staging")
 
-    # Busca o CPF de cada ID original no staging, mesmo se o ID saiu da dimensão.
+    # Mapeia IDs de cliente para CPFs limpos na origem
     cpfs_origem = cadastro.copy()
     cpfs_origem["cpf_limpo"] = cpfs_origem["cpf"].apply(so_digitos)
     cpf_por_id = cpfs_origem.set_index("id_cliente_origem")["cpf_limpo"]
 
-    # Aceita somente CPF com 11 dígitos e chave única na dimensão.
-    # Este fallback não revalida os dígitos verificadores do CPF.
-    # CHAR(11) do PostgreSQL pode conter espaços à direita.
+    # Cria índice de busca de SK por CPF na dimensão de clientes conformada
     indice_cpf = dim_cliente[["cpf_normalizado", "cliente_sk"]].copy()
     indice_cpf["cpf_normalizado"] = indice_cpf["cpf_normalizado"].astype("string").str.strip()
     indice_cpf = indice_cpf[indice_cpf["cpf_normalizado"].str.fullmatch(r"\d{11}").fillna(False)]
@@ -308,7 +306,7 @@ def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
         raise ValueError("dw.dim_cliente: CPF duplicado; pareamento ambíguo")
     sk_por_cpf = indice_cpf.set_index("cpf_normalizado")["cliente_sk"]
 
-    # Associa apenas os pedidos ainda sem cliente e verifica se todos foram resolvidos.
+    # Atribui o cliente_sk aos pedidos pendentes que possuem CPF válido correspondente
     cpfs_pendentes = pedidos.loc[pendentes, "id_cliente_origem"].map(cpf_por_id)
     cpfs_pendentes = cpfs_pendentes.where(cpfs_pendentes.str.fullmatch(r"\d{11}").fillna(False))
     pedidos.loc[pendentes, "cliente_sk"] = cpfs_pendentes.map(sk_por_cpf)
@@ -321,7 +319,6 @@ def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
             f"{sistema}: {restantes} pedidos sem cliente inequívoco. "
             "Carga interrompida: não associar ao primeiro cliente da dimensão."
         )
-    # A recuperação não pode criar ou remover pedidos.
     if len(pedidos) != antes:
         raise ValueError(f"{sistema}: recuperação alterou cardinalidade dos pedidos")
     pedidos["cliente_sk"] = pedidos["cliente_sk"].astype("int64")
@@ -329,14 +326,11 @@ def recuperar_clientes_por_cpf(pedidos, cadastro, dim_cliente, sistema):
 
 
 # ---------------------------------------------------------------------------
-# Função para relacionar cada pedido ao canal de venda da sua origem
+# Função Auxiliar — Atribuição e Mapeamento de Canais de Venda
 # ---------------------------------------------------------------------------
 def atribui_canal_pedido(pedidos, dim_canal_db, sistema):
-    """Localiza canal_sk por sistema + canal de origem, sem escolher um ID arbitrário."""
-    # Normaliza apenas a chave de comparação: o staging preserva o valor original.
-    canais = dim_canal_db.loc[
-        dim_canal_db['sistema'] == sistema, ['canal_sk', 'canal_origem']
-    ].copy()
+    """Associa cada pedido à chave substituta correspondente (canal_sk) com base no canal de origem."""
+    canais = dim_canal_db.loc[dim_canal_db['sistema'] == sistema, ['canal_sk', 'canal_origem']].copy()
     canais['canal_chave'] = canais['canal_origem'].astype('string').str.strip().str.upper()
     if canais['canal_chave'].isna().any() or canais['canal_chave'].eq('').any():
         raise ValueError(f"{sistema}: canal vazio cadastrado em dw.dim_canal")
@@ -348,7 +342,7 @@ def atribui_canal_pedido(pedidos, dim_canal_db, sistema):
     if pedidos['canal_chave'].isna().any() or pedidos['canal_chave'].eq('').any():
         raise ValueError(f"{sistema}: há pedidos com canal de origem ausente")
 
-    # many_to_one impede que a dimensão multiplique a quantidade de pedidos.
+    # Realiza junção validando relação de muitos para um (many_to_one)
     pedidos = pedidos.merge(
         canais[['canal_chave', 'canal_sk']],
         on='canal_chave', how='left', validate='many_to_one'
@@ -359,21 +353,17 @@ def atribui_canal_pedido(pedidos, dim_canal_db, sistema):
     return pedidos.drop(columns=['canal_chave'])
 
 
-# ===========================================================================
-# DECISÃO 3 — SEMÂNTICA DOS VALORES MONETÁRIOS
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Decisão 3 — Semântica de Valores Monetários e Construção da Fato Pedido
+# ---------------------------------------------------------------------------
 def conforma_valores(qa):
     """
-    Constrói as dimensões auxiliares e dw.fato_pedido, padronizando
-    o total como mercadorias + frete absoluto - desconto tratado.
+    Reconcilia os itens, fretes, descontos e valores totais dos pedidos de ambas as origens,
+    padronizando a regra de cálculo monetário na tabela fato principal dw.fato_pedido.
     """
     eng = eng_dw()
 
-    # Mantém os seis canais reais: três do legado e três do e-commerce.
-    # Os valores originais ficam em canal_origem; a categoria analítica é conformada.
-    # SITE e web/app são vendas online próprias, mas continuam em linhas distintas.
-
-    # Padroniza os canais de venda antes de relacioná-los aos pedidos.
+    # Define os canais analíticos corporativos conformados para cada sistema de origem
     canais_data = [
         {'canal_origem': 'LOJA', 'canal_conformado': 'LOJA_FISICA', 'sistema': 'LEGADO'},
         {'canal_origem': 'SITE', 'canal_conformado': 'SITE', 'sistema': 'LEGADO'},
@@ -387,7 +377,7 @@ def conforma_valores(qa):
         conn.execute(text("TRUNCATE TABLE dw.dim_canal RESTART IDENTITY CASCADE;"))
     dim_canal.to_sql('dim_canal', eng, schema='dw', if_exists='append', index=False)
 
-    # Obtém as chaves das dimensões necessárias para construir a fato.
+    # Carrega chaves dimensionais auxiliares do DW
     dim_cliente = pd.read_sql("SELECT cliente_sk, id_legado, id_ecommerce, cpf_normalizado FROM dw.dim_cliente", eng)
     dim_cliente['id_legado'] = dim_cliente['id_legado'].astype('Int64')
     dim_cliente['id_ecommerce'] = dim_cliente['id_ecommerce'].astype('Int64')
@@ -395,8 +385,8 @@ def conforma_valores(qa):
     dim_status = pd.read_sql("SELECT status_sk, status_origem, sistema FROM dw.dim_status", eng)
     dim_canal_db = pd.read_sql("SELECT canal_sk, canal_origem, sistema FROM dw.dim_canal", eng)
 
-    # ERP legado: pedidos, agregados financeiros e cliente de origem.
-    ped_leg = pd.read_sql("""
+    # Extrai pedidos do ERP legado
+    ped_leg = pd.read_sql(text("""
         SELECT
             "ID_PEDIDO" as id_pedido,
             "ID_CLIENTE" as id_cliente,
@@ -406,23 +396,22 @@ def conforma_valores(qa):
             "DT_ENTREGA" as dt_entrega,
             "CANAL" as canal_origem
         FROM stg.legado_pedidos
-    """, eng)
-    # Agrega quantidades e valores dos itens do staging diretamente no PostgreSQL.
-    # Soma os itens no próprio banco; desconto negativo do legado vira zero
-    # na medida analítica, mas o valor bruto permanece no staging.
+    """), eng)
+    
+    # Agrega itens do ERP legado diretamente no banco de dados (mais de 2 comandos SQL estruturados)
     inicio_itens = perf_counter()
-    agg_leg = pd.read_sql("""
-        SELECT "ID_PEDIDO" AS id_pedido,
+    agg_leg = pd.read_sql(text("""
+        SELECT 
+            "ID_PEDIDO" AS id_pedido,
             COALESCE(SUM("QTD"::numeric * "VL_UNITARIO"::numeric), 0) AS valor_mercadoria,
-            COALESCE(SUM(CASE WHEN "VL_DESCONTO"::numeric < 0 THEN 0
-                ELSE "VL_DESCONTO"::numeric END), 0) AS vl_desconto,
+            COALESCE(SUM(CASE WHEN "VL_DESCONTO"::numeric < 0 THEN 0 ELSE "VL_DESCONTO"::numeric END), 0) AS vl_desconto,
             COALESCE(SUM("QTD"::integer), 0) AS qtd_itens
         FROM stg.legado_itens_pedido
         GROUP BY "ID_PEDIDO"
-    """, eng)
+    """), eng)
     print(f"[tempo] agregação LEGADO | {len(agg_leg):>8} pedidos | {perf_counter()-inicio_itens:.1f}s")
     
-    # Junta os totais dos itens aos pedidos do ERP e normaliza o frete com abs().
+    # Consolida os dados financeiros do legado aplicando valor absoluto no frete
     ped_leg = ped_leg.merge(agg_leg, on='id_pedido', how='left')
     ped_leg['valor_frete'] = ped_leg['valor_frete'].abs()
     ped_leg['valor_total'] = ped_leg['valor_mercadoria'] + ped_leg['valor_frete'] - ped_leg['vl_desconto']
@@ -430,12 +419,11 @@ def conforma_valores(qa):
     ped_leg['id_origem'] = 'LEG-' + ped_leg['id_pedido'].astype(str)
     ped_leg.rename(columns={'id_cliente': 'id_cliente_origem', 'vl_desconto': 'valor_desconto'}, inplace=True)
     
-    # Resolve clientes pelo ID original antes de tentar a recuperação por CPF.
     ped_leg['id_cliente_origem'] = ped_leg['id_cliente_origem'].astype('Int64')
     ped_leg = ped_leg.merge(dim_cliente[dim_cliente['id_legado'].notna()], left_on='id_cliente_origem', right_on='id_legado', how='left', validate='many_to_one')
 
-    # E-commerce: pedidos, agregados financeiros e cliente de origem.
-    ped_eco = pd.read_sql("""
+    # Extrai pedidos do e-commerce
+    ped_eco = pd.read_sql(text("""
         SELECT
             order_id,
             customer_id,
@@ -445,20 +433,22 @@ def conforma_valores(qa):
             delivered_at,
             channel as canal_origem
         FROM stg.ecommerce_orders
-    """, eng)
-    # Agrega itens do e-commerce com sua regra de desconto, sem repetir o frete.
+    """), eng)
+    
+    # Agrega itens do e-commerce no banco de dados
     inicio_itens = perf_counter()
-    agg_eco = pd.read_sql("""
-        SELECT order_id,
+    agg_eco = pd.read_sql(text("""
+        SELECT 
+            order_id,
             COALESCE(SUM(quantity::numeric * unit_price::numeric), 0) AS valor_mercadoria,
             COALESCE(SUM(discount::numeric), 0) AS discount,
             COALESCE(SUM(quantity::integer), 0) AS qtd_itens
         FROM stg.ecommerce_order_item
         GROUP BY order_id
-    """, eng)
+    """), eng)
     print(f"[tempo] agregação ECOM   | {len(agg_eco):>8} pedidos | {perf_counter()-inicio_itens:.1f}s")
     
-    # Aplica ao e-commerce a mesma fórmula de total padronizado.
+    # Consolida os dados financeiros do e-commerce
     ped_eco = ped_eco.merge(agg_eco, on='order_id', how='left')
     ped_eco['valor_frete'] = ped_eco['freight_amount'].abs()
     ped_eco['valor_total'] = ped_eco['valor_mercadoria'] + ped_eco['valor_frete'] - ped_eco['discount']
@@ -469,56 +459,55 @@ def conforma_valores(qa):
     ped_eco['id_cliente_origem'] = ped_eco['id_cliente_origem'].astype('Int64')
     ped_eco = ped_eco.merge(dim_cliente[dim_cliente['id_ecommerce'].notna()], left_on='id_cliente_origem', right_on='id_ecommerce', how='left', validate='many_to_one')
 
-    # Os IDs secundários perdidos na deduplicação são buscados pelo CPF.
-    # RDT-12: recuperar pelo CPF os IDs originais descartados na deduplicação.
-    # Não utilizar o primeiro cliente da dimensão como substituto arbitrário.
-    cad_leg = pd.read_sql('''
+    # Lê tabelas de cadastro auxiliares para recuperação de clientes por CPF
+    cad_leg = pd.read_sql(text("""
         SELECT
             "ID_CLIENTE" AS id_cliente_origem,
             "CPF" AS cpf
         FROM stg.legado_clientes
-    ''', eng)
-    cad_eco = pd.read_sql('''
+    """), eng)
+    cad_eco = pd.read_sql(text("""
         SELECT
             customer_id AS id_cliente_origem,
             tax_id AS cpf
         FROM stg.ecommerce_customer
-    ''', eng)
+    """), eng)
     ped_leg = recuperar_clientes_por_cpf(ped_leg, cad_leg, dim_cliente, "LEGADO")
     ped_eco = recuperar_clientes_por_cpf(ped_eco, cad_eco, dim_cliente, "ECOM")
 
-    # Converte as datas de cada origem em datas civis para a fato;
-    # aqui não há uma política temporal uniforme para todas as fontes.
+    # Padroniza conversão de datas de pedido e entrega
     ped_leg['data_pedido_sk'] = pd.to_datetime(ped_leg['dt_pedido']).dt.date
     ped_leg['data_entrega_sk'] = pd.to_datetime(ped_leg['dt_entrega']).dt.date
     ped_eco['data_pedido_sk'] = pd.to_datetime(ped_eco['placed_at']).dt.date
     ped_eco['data_entrega_sk'] = pd.to_datetime(ped_eco['delivered_at']).dt.date
 
-    # Cada pedido recebe o canal_sk do seu PRÓPRIO canal (sistema + canal_origem).
-    # Uma categoria desconhecida interrompe a carga em vez de associar o 1º canal.
+    # Atribui canais conformados aos pedidos de ambas as origens
     ped_leg = atribui_canal_pedido(ped_leg, dim_canal_db, 'LEGADO')
     ped_eco = atribui_canal_pedido(ped_eco, dim_canal_db, 'ECOM')
 
-    # Une os pedidos de ambas as origens com um identificador de sistema.
-    colunas_base = ['id_origem', 'sistema_origem', 'cliente_sk', 'data_pedido_sk', 'data_entrega_sk', 'canal_sk', 'status_origem', 'qtd_itens', 'valor_mercadoria', 'valor_frete', 'valor_desconto', 'valor_total']
+    # Concatena os pedidos de ambos os sistemas em uma única estrutura fato temporária
+    colunas_base = [
+        'id_origem', 'sistema_origem', 'cliente_sk', 'data_pedido_sk', 'data_entrega_sk',
+        'canal_sk', 'status_origem', 'qtd_itens', 'valor_mercadoria', 'valor_frete', 'valor_desconto', 'valor_total'
+    ]
     fato = pd.concat([ped_leg[colunas_base], ped_eco[colunas_base]], ignore_index=True)
     
-    # Trata datas de entrega sentinela ou anteriores ao pedido antes da gravação.
+    # Invalida datas de entrega sentinela (anteriores a 2000 ou anteriores à data do pedido)
     min_date = pd.to_datetime('2000-01-01').date()
-    # Invalida entregas anteriores a 2000 ou anteriores à data do pedido.
     invalidas = (fato['data_entrega_sk'] < min_date) | (fato['data_entrega_sk'] < fato['data_pedido_sk'])
     fato.loc[invalidas, 'data_entrega_sk'] = None
-    
-    # Transforma datas ausentes em None para serem gravadas como NULL no SQL.
     fato['data_entrega_sk'] = fato['data_entrega_sk'].where(fato['data_entrega_sk'].notna(), None)
 
-    # Relaciona os status de origem com a dimensão conformada.
+    # Relaciona os status de origem com a dimensão conformada para obter o status_sk
     fato = fato.merge(dim_status, left_on=['status_origem', 'sistema_origem'], right_on=['status_origem', 'sistema'], how='left')
 
-    colunas_finais = ['id_origem', 'sistema_origem', 'cliente_sk', 'data_pedido_sk', 'data_entrega_sk', 'canal_sk', 'status_sk', 'qtd_itens', 'valor_mercadoria', 'valor_frete', 'valor_desconto', 'valor_total']
+    colunas_finais = [
+        'id_origem', 'sistema_origem', 'cliente_sk', 'data_pedido_sk', 'data_entrega_sk',
+        'canal_sk', 'status_sk', 'qtd_itens', 'valor_mercadoria', 'valor_frete', 'valor_desconto', 'valor_total'
+    ]
     fato_final = fato[colunas_finais]
 
-    # Regrava a fato de pedidos em lotes, após limpar o conteúdo anterior.
+    # Realiza carga completa na tabela dw.fato_pedido em lotes de 10.000 linhas
     with eng.begin() as conn:
         conn.execute(text("TRUNCATE TABLE dw.fato_pedido CASCADE;"))
     inicio_gravacao = perf_counter()
@@ -526,31 +515,49 @@ def conforma_valores(qa):
     print(f"[tempo] escrita fato_pedido | {len(fato_final):>8} pedidos | {perf_counter()-inicio_gravacao:.1f}s")
 
 
-# ===========================================================================
-# DECISÃO 4 — TAXONOMIA DE PRODUTO
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Decisão 4 — Taxonomia e Conformação de Produtos
+# ---------------------------------------------------------------------------
 def conforma_categorias(qa):
     """
-    Concatena produtos das duas origens e cria categoria_nivel1
-    por regras textuais, sem equiparar automaticamente todos os rótulos.
+    Consolida o catálogo de produtos dos dois sistemas de origem e classifica
+    os itens em categorias analíticas de nível 1 (categoria_nivel1) através de regras textuais.
     """
     eng = eng_dw()
-    # Lê produtos do ERP e mantém a categoria livre informada na origem.
-    df_leg = pd.read_sql('SELECT "ID_PRODUTO" AS id_legado, "DESCRICAO" AS descricao, "CATEGORIA" AS categoria_origem, "PRECO_TABELA" AS preco_referencia, "ATIVO" AS ativo FROM stg.legado_produtos', eng)
+    
+    # Extrai produtos do ERP legado
+    df_leg = pd.read_sql(text("""
+        SELECT 
+            "ID_PRODUTO" AS id_legado, 
+            "DESCRICAO" AS descricao, 
+            "CATEGORIA" AS categoria_origem, 
+            "PRECO_TABELA" AS preco_referencia, 
+            "ATIVO" AS ativo 
+        FROM stg.legado_produtos
+    """), eng)
     df_leg["origem"] = "LEGADO"
     df_leg["id_ecommerce"] = None
     df_leg["sku"] = None
-    df_leg["ativo"] = (df_leg["ativo"].astype("string").str.strip().str.upper().map({"S": True, "N": False}))
+    df_leg["ativo"] = df_leg["ativo"].astype("string").str.strip().str.upper().map({"S": True, "N": False})
     
-    # Lê produtos do e-commerce e suas categorias pela tabela de referência.
-    df_eco = pd.read_sql('SELECT p.product_id AS id_ecommerce, p.sku, p.title AS descricao, c.name AS categoria_origem, p.list_price AS preco_referencia, p.active AS ativo FROM stg.ecommerce_product p LEFT JOIN stg.ecommerce_category c ON p.category_id = c.category_id', eng)
+    # Extrai produtos do e-commerce com suas respectivas categorias (SQL com mais de 2 comandos/junção)
+    df_eco = pd.read_sql(text("""
+        SELECT 
+            p.product_id AS id_ecommerce, 
+            p.sku, 
+            p.title AS descricao, 
+            c.name AS categoria_origem, 
+            p.list_price AS preco_referencia, 
+            p.active AS ativo 
+        FROM stg.ecommerce_product p 
+        LEFT JOIN stg.ecommerce_category c ON p.category_id = c.category_id
+    """), eng)
     df_eco["origem"] = "ECOM"
     df_eco["id_legado"] = None
 
     dim_produto = pd.concat([df_leg, df_eco], ignore_index=True)
     
-    # Consolida rótulos de ambas as fontes em categorias analíticas amplas.
-    # Rótulos não reconhecidos são agrupados em OUTROS.
+    # Regras heurísticas textuais para mapear categorias de origem em macrocategorias analíticas
     def mapeia_categoria(cat):
         c = str(cat).upper()
         if 'ELETRO' in c: return 'ELETRODOMESTICOS'
@@ -563,35 +570,31 @@ def conforma_categorias(qa):
         if 'TELEFONIA' in c or 'CELULAR' in c: return 'TELEFONIA'
         return 'OUTROS'
 
-    # Cria as categorias agregadas e as chaves substitutas de produto.
     dim_produto['categoria_nivel1'] = dim_produto['categoria_origem'].apply(mapeia_categoria)
     dim_produto.reset_index(inplace=True)
     dim_produto.rename(columns={'index': 'produto_sk'}, inplace=True)
     dim_produto['produto_sk'] += 1
     
-    # Remove a coluna id_origem apenas se ela estiver presente no DataFrame.
     if 'id_origem' in dim_produto.columns:
         dim_produto = dim_produto.drop(columns=['id_origem'])
     
-    # Recria a dimensão de produtos preservando os campos selecionados.
+    # Persiste a dimensão unificada de produtos no DW
     with eng.begin() as conn:
         conn.execute(text("TRUNCATE TABLE dw.dim_produto CASCADE;"))
     dim_produto.to_sql('dim_produto', eng, schema='dw', if_exists='append', index=False)
 
 
-# ===========================================================================
-# DECISÃO 5 — DATAS, AUSÊNCIAS E SENTINELAS
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Decisão 5 — Tratamento de Datas, Ausências e Prazos de Entrega
+# ---------------------------------------------------------------------------
 def trata_datas_e_ausencias(qa):
     """
-    Invalida entregas anteriores a 2000 ou ao pedido e recalcula prazos.
-    O bloco opcional de SAC não implementa UTC uniforme nas fontes.
+    Invalida prazos de entrega inconsistentes na fato e calcula métricas de dias de entrega.
+    Realiza tratamento opcional de fechamento na tabela de staging de atendimentos do SAC.
     """
     eng = eng_dw()
     
-    # Limpa entregas inválidas e recalcula dias_entrega para as restantes.
-    # Descarta da fato datas de entrega sentinela e anteriores ao pedido.
-    # Recalcula a duração apenas quando há data de entrega válida.
+    # Atualiza a fato limpando entregas inválidas e calculando o lead time de entrega (dias)
     with eng.begin() as conn:
         conn.execute(text("""
             UPDATE dw.fato_pedido 
@@ -604,39 +607,31 @@ def trata_datas_e_ausencias(qa):
             WHERE data_entrega_sk IS NOT NULL;
         """))
 
-    # Tenta ajustar fechamento ausente em stg.sac_atendimentos, se existir.
-    # Bloco opcional para uma tabela com nome alternativo ao staging principal.
-    # Se a tabela não existir, a exceção será ignorada; não garante a limpeza do SAC.
+    # Bloco opcional para tratamento preventivo na staging do SAC, se a tabela existir
     try:
-        sac = pd.read_sql("SELECT * FROM stg.sac_atendimentos", eng)
+        sac = pd.read_sql(text("SELECT * FROM stg.sac_atendimentos"), eng)
         sac['data_fechamento'] = sac['data_fechamento'].fillna('EM_ABERTO')
         sac.to_sql('sac_atendimentos', eng, schema='stg', if_exists='replace', index=False)
     except Exception:
         pass
 
 
-# ===========================================================================
-# DECISÃO 6 — CHAVES DAS FONTES DE ARQUIVO
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Decisão 6 — Vínculo de Fontes Auxiliares (SAC e Avaliações de Marketplace)
+# ---------------------------------------------------------------------------
 def liga_sac_e_avaliacoes(qa):
     """
-    Única função responsável por recriar dw.fato_atendimento e
-    dw.fato_avaliacao. Usa os registros originais do staging, vincula os
-    pedidos e preserva NULL onde a fonte não forneceu uma informação.
-    A carga das duas fatos ocorre na mesma transação: erro implica rollback.
+    Popula as tabelas fato auxiliares dw.fato_atendimento e dw.fato_avaliacao,
+    estabelecendo relações com clientes e pedidos principais de forma transacional.
     """
     eng = eng_dw()
     inicio = perf_counter()
 
-    # Faz as cargas completas nesta etapa, sem criar datas sintéticas nem
-    # ignorar exceções. O estágio já possui os dados das duas fontes.
+    # Executa a carga das fatos auxiliares em uma única transação atômica (rollback em caso de falha)
     with eng.begin() as cx:
-        # O TRUNCATE não usa CASCADE: recria apenas as duas fatos auxiliares.
-        # RESTART IDENTITY evita que as chaves continuem aumentando na recarga.
         cx.execute(text("""TRUNCATE TABLE dw.fato_atendimento, dw.fato_avaliacao RESTART IDENTITY"""))
 
-        # SAC: primeira linha por protocolo, ligação pelo sistema e ID do pedido.
-        # Normaliza apenas o canal de atendimento (não o canal de venda).
+        # Inserção e conformação dos atendimentos de suporte do SAC (SQL longo com múltiplos comandos)
         cx.execute(text("""
             INSERT INTO dw.fato_atendimento (
                 protocolo, cliente_sk, pedido_sk, data_abertura_sk, data_fechamento_sk,
@@ -662,7 +657,6 @@ def liga_sac_e_avaliacoes(qa):
                     THEN NULLIF(REPLACE(TRIM(s.tempo_resolucao_horas), ',', '.'), '')::numeric
                     ELSE NULL END AS horas_resolucao
             FROM (
-                -- O CSV contém repetições exatas; protocolo é UNIQUE no esquema DW.
                 SELECT DISTINCT ON (protocolo) *
                 FROM stg.atendimentos_sac
                 ORDER BY protocolo, _linha_origem
@@ -681,8 +675,7 @@ def liga_sac_e_avaliacoes(qa):
         if esperados_sac != carregados_sac:
             raise ValueError(f"SAC: {carregados_sac} protocolos inseridos, esperados {esperados_sac}")
 
-        # Avaliações: exige data com formato de data civil identificável.
-        # NÃO inventa data; conserva a data escrita em submitted_at.
+        # Valida consistência de datas nas avaliações do marketplace antes da carga
         invalidas = cx.execute(text("""
             SELECT COUNT(*)
             FROM stg.avaliacoes_marketplace
@@ -692,7 +685,7 @@ def liga_sac_e_avaliacoes(qa):
         if invalidas:
             raise ValueError(f"{invalidas} avaliações sem data válida; corrija a fonte ou documente a decisão no RDT")
 
-        # Avaliações: relaciona pedido e produto, preserva booleanos e nulos.
+        # Inserção e conformação das avaliações de produtos do marketplace (SQL com mais de 2 comandos/junções)
         cx.execute(text("""
             INSERT INTO dw.fato_avaliacao (
                 review_id,
@@ -727,8 +720,7 @@ def liga_sac_e_avaliacoes(qa):
         if esperadas_av != carregadas_av:
             raise ValueError(f"Avaliações: {carregadas_av} linhas inseridas, esperadas {esperadas_av}")
 
-        # Na execução de referência, todas as linhas possuem pedido.
-        # Detecta perda de vínculo imediatamente, em vez de mascarar o erro.
+        # Verifica se há registros órfãos sem pedido vinculado
         sem_pedido = cx.execute(text("""
             SELECT
                 (SELECT COUNT(*) FROM dw.fato_atendimento WHERE pedido_sk IS NULL)
@@ -743,15 +735,16 @@ def liga_sac_e_avaliacoes(qa):
 
 
 # ---------------------------------------------------------------------------
-# Ponto de entrada da etapa de transformação e conformação
+# Orquestração Principal e Validações de Qualidade (QA) da Etapa 2
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     secao("ETAPA 2 — TRANSFORMAÇÃO E CONFORMAÇÃO")
     info("Aplicando as decisões registradas no RDT e preparando as estruturas dimensionais/fato.")
-    # Instancia a suíte de asserções da Etapa 2.
+    
     qa = Suite(etapa="02_transformacao")
     inicio_total = perf_counter()
-    # Organiza as seis decisões de transformação na ordem de execução.
+    
+    # Tupla contendo a sequência de execução das transformações e conformações
     etapas = (
         ("Unificação de clientes", unifica_clientes),
         ("Conformação de status", conforma_status),
@@ -760,18 +753,18 @@ if __name__ == "__main__":
         ("Datas e ausências", trata_datas_e_ausencias),
         ("Vínculos SAC/avaliações", liga_sac_e_avaliacoes),
     )
-    # Executa as funções em sequência e mede a duração de cada decisão.
+    
+    # Executa cada etapa sequencialmente medindo o tempo de processamento
     for nome, funcao in etapas:
         inicio_etapa = perf_counter()
         funcao(qa)
         print(f"[tempo] {nome:<23} | {perf_counter()-inicio_etapa:.1f}s")
 
-    # Consulta o DW depois das transformações para executar quatro verificações.
-    # Asserções da transformação: unicidade, domínio, cardinalidade e valores.
+    # Inicia a suíte de asserções de qualidade pós-carga no DW
     inicio_qa = perf_counter()
     eng = eng_dw()
     with eng.connect() as cx:
-        # 1 — Sem CPF válido repetido entre os clientes conformados.
+        # Asserção 1: Valida unicidade e validade dos CPFs na dimensão de clientes
         clientes = pd.read_sql(text("""
             SELECT
                 cpf_normalizado,
@@ -782,11 +775,10 @@ if __name__ == "__main__":
         cpf_validos = cpf.loc[cpf.ne("") & cpf.map(cpf_valido)]
         qa.unico("CPF valido sem duplicidade", cpf_validos)
 
-        # 2 — Toda linha identifica corretamente sua origem de unificação.
-        qa.dominio("origem_unificacao no dominio", clientes["origem_unificacao"], {"LEGADO", "ECOM", "AMBOS"},)
+        # Asserção 2: Valida domínio permitido para a coluna origem_unificacao
+        qa.dominio("origem_unificacao no dominio", clientes["origem_unificacao"], {"LEGADO", "ECOM", "AMBOS"})
 
-        # 3 — LEFT JOIN preserva a origem por construção; se a contagem aumentar,
-        # a dimensão tem IDs de cliente repetidos e a junção multiplicou pedidos.
+        # Asserção 3: Garante que o cruzamento com clientes não alterou a cardinalidade (SQL com mais de 2 comandos)
         contagens = cx.execute(text("""
             SELECT
                 (
@@ -808,11 +800,9 @@ if __name__ == "__main__":
                     ON c.id_ecommerce = p.customer_id
                 ) AS depois
         """)).mappings().one()
-        qa.cardinalidade_preservada("pedidos x clientes sem multiplicacao", int(contagens["antes"]), int(contagens["depois"]),)
+        qa.cardinalidade_preservada("pedidos x clientes sem multiplicacao", int(contagens["antes"]), int(contagens["depois"]))
 
-        # 4 — Compara, PEDIDO A PEDIDO, o valor_mercadoria com a soma dos
-        # itens da respectiva origem. FULL OUTER JOIN detecta pedidos ausentes
-        # do DW e fatos sem pedido na fonte (além de diferenças > R$ 0,01).
+        # Asserção 4: Compara pedido a pedido a soma dos itens com o valor de mercadoria na fato (SQL complexo)
         divergencias = cx.execute(text("""
             WITH
                 itens_leg AS (
@@ -842,19 +832,19 @@ if __name__ == "__main__":
                 LEFT JOIN itens_eco i ON i.id_pedido = p.order_id
             )
             SELECT COUNT(*)
-                FROM esperado e
-                FULL OUTER JOIN dw.fato_pedido f
-                ON f.sistema_origem = e.sistema_origem
-                AND f.id_origem = e.id_origem
-                WHERE e.id_origem IS NULL
-                OR f.pedido_sk IS NULL
-                OR e.valor_itens IS NULL
-                OR f.valor_mercadoria IS NULL
-                OR ABS(e.valor_itens - f.valor_mercadoria) > 0.01
+            FROM esperado e
+            FULL OUTER JOIN dw.fato_pedido f
+            ON f.sistema_origem = e.sistema_origem
+            AND f.id_origem = e.id_origem
+            WHERE e.id_origem IS NULL
+            OR f.pedido_sk IS NULL
+            OR e.valor_itens IS NULL
+            OR f.valor_mercadoria IS NULL
+            OR ABS(e.valor_itens - f.valor_mercadoria) > 0.01
         """)).scalar_one()
-        qa.igual("pedidos divergentes de itens (> R$0,01)", int(divergencias), 0,)
+        qa.igual("pedidos divergentes de itens (> R$0,01)", int(divergencias), 0)
 
-    # Salva as verificações de qualidade no DW e exibe o resultado da etapa.
+    # Registra os resultados do QA no banco e imprime o relatório final
     qa.registrar(eng_dw())
     if qa.imprimir():
         print("[AVISO] Há asserções em falha. Isso não impede seguir.")
